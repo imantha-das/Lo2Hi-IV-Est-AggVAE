@@ -91,8 +91,11 @@ shp_hi_p = "data/raw/shp_files/cb_2018_us_state_5m/cb_2018_us_state_5m.shp"
 df_shp_hi = gpd.read_file(shp_hi_p)
 
 # Remove Rows
-rows_to_remove = ["Alaska", "California", "Oregon", "Washington", "Hawaii", "American Samoa", "Puerto Rico",
+# rows_to_remove = ["Alaska", "California", "Oregon", "Washington", "Hawaii", "American Samoa", "Puerto Rico",
+#                     "United States Virgin Islands", "Guam", "Commonwealth of the Northern Mariana Islands"]
+rows_to_remove = ["Alaska", "Hawaii", "American Samoa", "Puerto Rico",
                     "United States Virgin Islands", "Guam", "Commonwealth of the Northern Mariana Islands"]
+
 for row_name in rows_to_remove:
     df_shp_hi = remove_row(df_shp_hi, col_name="NAME", row_value=row_name)
 df_shp_hi.reset_index(inplace = True)
@@ -108,8 +111,12 @@ flu_hi_p = "data/raw/flu_net/state_22to23/WHO_NREVSS_Public_Health_Labs.csv"
 df_flu_hi = pd.read_csv(flu_hi_p, skiprows=1)
 
 # Remove Rows
-rows_to_remove = ["Alaska", "California", "Oregon", "Washington", "Hawaii", "American Samoa", "Puerto Rico",
-                  "Virgin Islands", "New York City"]  
+# rows_to_remove = ["Alaska", "California", "Oregon", "Washington", "Hawaii", 
+#                   "American Samoa", "Puerto Rico", "Virgin Islands", 
+#                   "New York City"]  
+rows_to_remove = ["Alaska", "Hawaii","American Samoa", "Puerto Rico", "Virgin Islands", 
+                    "New York City"]
+
 for row_name in rows_to_remove:
     df_flu_hi = remove_row(df_flu_hi, col_name="REGION", row_value=row_name)
 
@@ -138,10 +145,12 @@ df_flu_hi["total_flu_cases"] = df_flu_hi.apply(
 df_flu_hi = df_flu_hi.filter(["area", "total_specimens", "total_flu_cases"])
 # Rename Columns as GeoPandas doesnt save > 10chars
 df_flu_hi.rename(columns = {"total_specimens" : "tot_specs", "total_flu_cases" : "tot_cases"}, inplace = True)
-print(df_flu_hi)
+
     # --------------------------- Combine High Admin Data --------------------------- #
 df_hi = df_shp_hi.merge(df_flu_hi, how = "left", left_on="area", right_on = "area")
-   
+df_hi.reset_index(inplace = True)
+print(df_hi)
+
 # # ------------------------------ Write to folder ----------------------------- #
 fold_p = "data/processed/high"
 file_n = "us_state_divisions"

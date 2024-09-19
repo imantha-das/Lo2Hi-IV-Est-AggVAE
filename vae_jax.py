@@ -317,24 +317,24 @@ if __name__ == "__main__":
 
     rng_key, rng_key_samp, rng_key_init = random.split(args["rng_key"],3)
     init_batch = agg_gp_predictive(rng_key_, args)["gp_aggr"] #(num_samples, num_regions) i.e (5, 116)
-    # svi_state = svi.init(rng_key_init, init_batch)
+    svi_state = svi.init(rng_key_init, init_batch)
     
-    # test_loss_list = []
-    # for i in range(args["num_epochs"]):
-    #     rng_key, rng_key_train, rng_key_test, rng_key_infer = random.split(rng_key, 4)
-    #     num_train = 1000
-    #     # Where forward/backward pass gets called for train
-    #     _ , svi_state = epoch_train(rng_key_train, svi_state, num_train)
+    test_loss_list = []
+    for i in range(args["num_epochs"]):
+        rng_key, rng_key_train, rng_key_test, rng_key_infer = random.split(rng_key, 4)
+        num_train = 1000
+        # Where forward/backward pass gets called for train
+        _ , svi_state = epoch_train(rng_key_train, svi_state, num_train)
 
-    #     num_test = 1000 
-    #     # Where forward/backward pass gets called for test
-    #     test_loss = eval_test(rng_key_test, svi_state, num_test)
-    #     test_loss_list += [test_loss]
+        num_test = 1000 
+        # Where forward/backward pass gets called for test
+        test_loss = eval_test(rng_key_test, svi_state, num_test)
+        test_loss_list += [test_loss]
 
-    #     print("Epoch : {}, loss : {} ({:.2f} s.)".format(i, test_loss, test.time() - t_start))
+        print("Epoch : {}, loss : {} ({:.2f} s.)".format(i, test_loss, test.time() - t_start))
 
-    #     if math.isnan(test_loss):
-    #         break 
+        if math.isnan(test_loss):
+            break 
     
 
 

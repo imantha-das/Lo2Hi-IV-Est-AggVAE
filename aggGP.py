@@ -65,9 +65,10 @@ def M_g(M, g):
 def case_est_model_gp_aggr(args, y = None):
     """Aggregated Gaussian Process model"""
     #n_cases = args["n_low_obs"] # (8,)
-    n_specimens = args["n_low_specs"]
+    n_specimens = args["n_specimens"]
     #? we dont need high resolution data as we are estimating it
     #n_hi_obs = args["n_high_obs"] #(48,)
+    x = args["x"]
     gp_kernel = args["gp_kernel"]
     noise = args["noise"]
     jitter = args["jitter"]
@@ -90,7 +91,7 @@ def case_est_model_gp_aggr(args, y = None):
         )
     
     # aggregated f into gp_aggr according to indexing of (point in polygon)
-    gp_aggr = numpyro.deterministic("gp_aggr_lo", M_g(M, f))
+    gp_aggr = numpyro.deterministic("gp_aggr", M_g(M, f))
     
     # fixed effects
     b0 = numpyro.sample("b0", dist.Normal(0,1))
@@ -99,7 +100,14 @@ def case_est_model_gp_aggr(args, y = None):
     theta = numpyro.deterministic("theta", jax.nn.sigmoid(lp))
 
     #todo : Check with Swapnil if "n_specimens" is the right argument to pass to "total_count"
-    numpyro.sample("cases", dist.BinomialLogits(total_count= n_specimens, logits = lp), obs = y)
+    numpyro.sample(
+        "cases", 
+        dist.BinomialLogits(
+            total_count= n_specimens, 
+            logits = lp
+        ), 
+        obs = y
+    )
 
 
 if __name__ == "__main__":
@@ -121,15 +129,13 @@ if __name__ == "__main__":
     # ---------------------------- Variables for Model ---------------------------- #
     args = {
         #"n_low_obs" : df_lo.tot_cases, #observarions <- This is passed as y
-        "n_low_specs" : jnp.array(df_lo.tot_specs),  
+        "n_specimens" : jnp.array(df_lo.tot_specs),  
         "x" : jnp.array(x),
         "gp_kernel" : exp_sq_kernel,
         "jitter" : 1e-4,
         "noise" : 1e-4,
         "M" : pol_pt_lo,
-        #todo : You can probably remove M2 as this is not needed
-        "M2" : pol_pt_hi,
-        "combine" : False # Get combined results for 
+        #todo : Check with Swapnil, do we need M2 : pol_pt_hi
     }
 
     # ---------------------------- Aggregated GP model --------------------------- #
@@ -146,10 +152,11 @@ if __name__ == "__main__":
     start = time.time()
     mcmc.run(run_key, args, y = np.array(df_lo.tot_cases))
     end = time.time()
-    print(f"Time taken for aggGP : {end - start}'s")
+    t_elapsed_min = round((end - start)/60) 
+    print(f"Time taken for aggGP : {t_elapsed_min}'min")
 
     # -------------------------------- Save Model -------------------------------- #
-    with open(f"model_weights/aggGP_samples{n_samples}_tt{end-start}s", 'wb') as file:
+    with open(f"model_weights/aggGP_samples{n_samples}_tt{t_elapsed_min}min", 'wb') as file:
         dill.dump(mcmc, file)
 
     print("\nMCMC elapsed time:", round(end), "s")

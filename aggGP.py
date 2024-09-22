@@ -71,7 +71,7 @@ def case_est_model_gp_aggr(args, y = None):
     gp_kernel = args["gp_kernel"]
     noise = args["noise"]
     jitter = args["jitter"]
-    M_lo = args["M1"]
+    M = args["M"]
     #? we dont need high resolution data as we are estimating it
     #M2 = args["pol_pt_hi"]
 
@@ -90,7 +90,7 @@ def case_est_model_gp_aggr(args, y = None):
         )
     
     # aggregated f into gp_aggr according to indexing of (point in polygon)
-    gp_aggr = numpyro.deterministic("gp_aggr_lo", M_g(M_lo, f))
+    gp_aggr = numpyro.deterministic("gp_aggr_lo", M_g(M, f))
     
     # fixed effects
     b0 = numpyro.sample("b0", dist.Normal(0,1))
@@ -126,7 +126,7 @@ if __name__ == "__main__":
         "gp_kernel" : exp_sq_kernel,
         "jitter" : 1e-4,
         "noise" : 1e-4,
-        "M1" : pol_pt_lo,
+        "M" : pol_pt_lo,
         #todo : You can probably remove M2 as this is not needed
         "M2" : pol_pt_hi,
         "combine" : False # Get combined results for 

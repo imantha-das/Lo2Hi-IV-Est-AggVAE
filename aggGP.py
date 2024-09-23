@@ -2,6 +2,19 @@
 # Script to Run Aggregated Gaussian Process on Influenza Cases at differnt 
 # resolution administrative boundaries.
 # ==============================================================================
+
+# ==============================================================================
+# Questions
+#  
+# Once we train an aggGP on low resolution data, how do we use it to predict
+# High resilution data. Unlike change of state problem we only use the low
+# resolution data to train. So "prev_model_gp_aggr" returns (num_samples, num_regions)
+# posterior at the end.
+# Not to use the numpyro's "Predictive" function we need to pass ...
+# `Predictive(prev_model_gp_aggr, pos_samples_hi)` but we dont have pos_samples_hi
+# since we performed mcmc on pos_samples_lo ....
+# ==============================================================================
+
 # ---------------------------------- Imports --------------------------------- #
 
 import os
@@ -62,7 +75,7 @@ def M_g(M, g):
     return(jnp.matmul(M, g))
 
 # ------------------------ Aggregated prevelance model ----------------------- #
-def case_est_model_gp_aggr(args, y = None):
+def prev_model_gp_aggr(args, y = None):
     """Aggregated Gaussian Process model"""
     #n_cases = args["n_low_obs"] # (8,)
     n_specimens = args["n_specimens"]
@@ -93,24 +106,25 @@ def case_est_model_gp_aggr(args, y = None):
     # aggregated f into gp_aggr according to indexing of (point in polygon)
     gp_aggr = numpyro.deterministic("gp_aggr", M_g(M, f))
     
-    # fixed effects
+    # fixed effects : Createf param
     b0 = numpyro.sample("b0", dist.Normal(0,1))
-    # Linear predictor
+    # Linear predictor : lp probabbly means logit prevelance
     lp = b0 + gp_aggr 
+    # theta represents the prevelence value
     theta = numpyro.deterministic("theta", jax.nn.sigmoid(lp))
 
-    #todo : Check with Swapnil if "n_specimens" is the right argument to pass to "total_count"
     numpyro.sample(
         "cases", 
         dist.BinomialLogits(
-            total_count= n_specimens, 
-            logits = lp
+            total_count= n_specimens, # n_specimens represent total RDT tests
+            logits = lp # lp represents logistic(theta)
         ), 
-        obs = y
+        obs = y #represents the number of +ve cases
     )
 
 
 if __name__ == "__main__":
+
     # --------------------------------- Load Data -------------------------------- #
     data_dir = "data/processed"
     
@@ -126,15 +140,23 @@ if __name__ == "__main__":
     df_lo = gpd.read_file(os.path.join(data_dir, "low", "us_census_divisions","us_census_divisions.shp"))
     df_hi = gpd.read_file(os.path.join(data_dir, "high", "us_state_divisions","us_state_divisions.shp"))
     
+    #* ==========================================================================
+    #* -------------------- Variables that need to be changed -------------------- #
+    total_specimens = df_lo.tot_specs
+    M = pol_pt_lo
+    total_cases = df_lo.tot_cases
+    save_hi_lo = "lo"
+    #* ==========================================================================
+
     # ---------------------------- Variables for Model ---------------------------- #
     args = {
         #"n_low_obs" : df_lo.tot_cases, #observarions <- This is passed as y
-        "n_specimens" : jnp.array(df_lo.tot_specs),  
+        "n_specimens" : jnp.array(total_specimens),  
         "x" : jnp.array(x),
         "gp_kernel" : exp_sq_kernel,
         "jitter" : 1e-4,
         "noise" : 1e-4,
-        "M" : pol_pt_lo,
+        "M" : M,
         #todo : Check with Swapnil, do we need M2 : pol_pt_hi
     }
 
@@ -143,22 +165,25 @@ if __name__ == "__main__":
     n_warm = 200
     n_samples = 1000
     mcmc = MCMC(
-        NUTS(case_est_model_gp_aggr), 
+        NUTS(prev_model_gp_aggr), 
         num_warmup=n_warm,
         num_samples = n_samples
     )
 
     # --------------------------------- Run MCMC --------------------------------- #
     start = time.time()
-    mcmc.run(run_key, args, y = np.array(df_lo.tot_cases))
+    mcmc.run(run_key, args, y = np.array(total_cases))
     end = time.time()
     t_elapsed_min = round((end - start)/60) 
     print(f"Time taken for aggGP : {t_elapsed_min}'min")
 
     # -------------------------------- Save Model -------------------------------- #
-    with open(f"model_weights/aggGP_samples{n_samples}_tt{t_elapsed_min}min", 'wb') as file:
+    f_path = f"model_weights/aggGP_{save_hi_lo}_nsamples_{n_samples}_tt{t_elapsed_min}min"
+    with open(f_path, 'wb') as file:
         dill.dump(mcmc, file)
 
     print("\nMCMC elapsed time:", round(end), "s")
     print("\nMCMC elapsed time:", round(end/60), "min")
     print("\nMCMC elapsed time:", round(end/(60*60)), "h")
+
+    

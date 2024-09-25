@@ -3,18 +3,6 @@
 # resolution administrative boundaries.
 # ==============================================================================
 
-# ==============================================================================
-# Questions
-#  
-# Once we train an aggGP on low resolution data, how do we use it to predict
-# High resilution data. Unlike change of state problem we only use the low
-# resolution data to train. So "prev_model_gp_aggr" returns (num_samples, num_regions)
-# posterior at the end.
-# Not to use the numpyro's "Predictive" function we need to pass ...
-# `Predictive(prev_model_gp_aggr, pos_samples_hi)` but we dont have pos_samples_hi
-# since we performed mcmc on pos_samples_lo ....
-# ==============================================================================
-
 # ---------------------------------- Imports --------------------------------- #
 
 import os
@@ -30,6 +18,8 @@ from jax import random
 import numpyro
 import numpyro.distributions as dist
 from numpyro.infer import NUTS, MCMC
+
+from termcolor import colored
 
 import dill
 # ---------------------------- GP Kernel Function ---------------------------- #
@@ -75,53 +65,68 @@ def M_g(M, g):
     return(jnp.matmul(M, g))
 
 # ------------------------ Aggregated prevelance model ----------------------- #
-def prev_model_gp_aggr(args, y = None):
+def prev_model_gp_aggr(args, tested_positive = None):
     """Aggregated Gaussian Process model"""
-    #n_cases = args["n_low_obs"] # (8,)
-    n_specimens = args["n_specimens"]
-    #? we dont need high resolution data as we are estimating it
-    #n_hi_obs = args["n_high_obs"] #(48,)
-    x = args["x"]
-    gp_kernel = args["gp_kernel"]
-    noise = args["noise"]
-    jitter = args["jitter"]
-    M = args["M"]
-    #? we dont need high resolution data as we are estimating it
-    #M2 = args["pol_pt_hi"]
+    n_specimens_lo = args["n_specimens_lo"] # number of tests conducted
+    n_specimens_hi = args["n_specimens_hi"]
+    x = args["x"] #num grid pts for lat/lon : (2618,2)
+    gp_kernel = args["gp_kernel"] # Gaussian process kernal
+    noise = args["noise"] #(,)
+    jitter = args["jitter"]# (,)
+    M_lo = args["M_lo"] # R in [0,1] where 1 indicates point inside a region : (9, 2618)
+    M_hi = args["M_hi"] # (49,2618)
+    kernel_length = args["kernel_length"] #dist.InverseNormal(3,3)
+    kernel_var = args["kernel_var"] #dist.HalfNormal(0.05)
 
     # random effects - aggregated GP 
     # Hyperparamas for kernel covariance
-    length = numpyro.sample("kernel_length", dist.InverseGamma(3,3))
-    var = numpyro.sample("kernel_var", dist.HalfNormal(0.05))
+    length = numpyro.sample("kernel_length", kernel_length)
+    var = numpyro.sample("kernel_var", kernel_var)
     # GP Kernel
     k = gp_kernel(x,x,var, length, noise, jitter)
-    # GP Draw
+    # GP Draw : Retuns a value for each grid point
     f = numpyro.sample(
         "f", 
         dist.MultivariateNormal(
             loc = jnp.zeros(x.shape[0]), 
             covariance_matrix= k)
-        )
+        ) #(2618,)
     
-    # aggregated f into gp_aggr according to indexing of (point in polygon)
-    gp_aggr = numpyro.deterministic("gp_aggr", M_g(M, f))
+    # Pick relevent points for all the low regions (n points) from all the points (2618)
+    # this returns the aggregated values per region ...
+    gp_aggr_lo = numpyro.deterministic("gp_aggr_lo", M_g(M_lo, f)) #(9,)
+    gp_aggr_hi = numpyro.deterministic("gp_aggr_hi", M_g(M_hi, f)) #(49,)
+    # Now we need to aggregate both. This step is important since even though we only
+    # show the model the low resolution data, to produce high resolution data it
+    # needs th GP realizations for those regions
+    gp_aggr = numpyro.deterministic("gp_aggr", jnp.concatenate([gp_aggr_lo,gp_aggr_hi])) #(58,)
     
-    # fixed effects : Createf param
-    b0 = numpyro.sample("b0", dist.Normal(0,1))
-    # Linear predictor : lp probabbly means logit prevelance
-    lp = b0 + gp_aggr 
+    # fixed effects : Create param
+    b0 = numpyro.sample("b0", dist.Normal(0,1)) #(,)
+    # Linear predictor : lp probably means logit prevelance
+    lp = b0 + gp_aggr #? (58,) <- values are actually pos/negative and not between 0 and 1. Could be something wrong with the gp. but also we are taking binomial logits so potentially ok
+
     # theta represents the prevelence value
-    theta = numpyro.deterministic("theta", jax.nn.sigmoid(lp))
+    theta = numpyro.deterministic("theta", jax.nn.sigmoid(lp)) #(58,)
 
-    numpyro.sample(
-        "cases", 
-        dist.BinomialLogits(
-            total_count= n_specimens, # n_specimens represent total RDT tests
-            logits = lp # lp represents logistic(theta)
-        ), 
-        obs = y #represents the number of +ve cases
-    )
+    # Add NaN values to n_positive to accomodate unavailable data for high resolution. 
+    # n_positive : [low_res_pos ... nan for high_res ...]
+    tested_positive = jnp.pad(tested_positive, (0, M_hi.shape[0]),constant_values = 0.0) #[3762.  484. ... , 0,0,0]
+    tested_positive = jnp.where(tested_positive == 0, jnp.nan, tested_positive)# [3762.  484. ... , nan,nan,nan]
+    tested_positive_mask = ~jnp.isnan(tested_positive) # [True, True, ...., False, False, False]
 
+    # Aggregate n_specimens lo and hi
+    tested_cases = jnp.concatenate([n_specimens_lo, n_specimens_hi], axis = 0) #(58,)
+
+    #We use numpyro.handlers.mask to make sure we can account for NaN values for observations
+    with numpyro.handlers.mask(mask=tested_positive_mask): 
+        n_positive_obs =  numpyro.sample(
+            "n_positive_obs", 
+            dist.BinomialLogits(total_count=tested_cases, logits=lp), 
+            obs=tested_positive
+        )
+
+    return n_positive_obs
 
 if __name__ == "__main__":
 
@@ -142,28 +147,43 @@ if __name__ == "__main__":
     
     #* ==========================================================================
     #* -------------------- Variables that need to be changed -------------------- #
-    total_specimens = df_lo.tot_specs
-    M = pol_pt_lo
-    total_cases = df_lo.tot_cases
+    test_cases_lo = jnp.array(df_lo.tot_specs) #(9,)
+    test_cases_hi = jnp.array(df_hi.tot_specs) #(49,)
+    M1 = pol_pt_lo #(9,2618)
+    M2 = pol_pt_hi #(49,2618)
+    tested_positive_lo = jnp.array(df_lo.tot_cases) #(9,)
     save_hi_lo = "lo"
     #* ==========================================================================
 
+    # -------------------------- Mask Hi Resolution data ------------------------- #
+    # We need to aggregate the values for the hi resolution data for total specimens
+    # we dont know the values for these in real life because we are estimating these
+    # the prior should handle this from what I believe
+    # So create NaN values and append them for the Hi Res Regions.
+
+    # jnp.pad soesnt accept NaNs so use 0 as constand and use where to replace 0 with nan
+
+    
     # ---------------------------- Variables for Model ---------------------------- #
     args = {
         #"n_low_obs" : df_lo.tot_cases, #observarions <- This is passed as y
-        "n_specimens" : jnp.array(total_specimens),  
-        "x" : jnp.array(x),
+        "n_specimens_lo" : jnp.array(test_cases_lo), # Number of tests for low resolution regions, (9,)
+        "n_specimens_hi" : jnp.array(test_cases_hi),
+        "x" : jnp.array(x), # Lat/lon vals of grid points, (2468,2)
         "gp_kernel" : exp_sq_kernel,
-        "jitter" : 1e-4,
+        "jitter" : 1e-4, 
         "noise" : 1e-4,
-        "M" : M,
-        #todo : Check with Swapnil, do we need M2 : pol_pt_hi
+        "M_lo" : pol_pt_lo, # R in [0,1] where 1 indicates point in region, (9, 2468)
+        "M_hi" : pol_pt_hi, #R in [0,1] where 1 indicates point in region , (49,2468)
+        # GP Kernel Hyperparams
+        "kernel_length" : dist.InverseGamma(3,3), #(,)
+        "kernel_var" : dist.HalfNormal(0.05)
     }
 
     # ---------------------------- Aggregated GP model --------------------------- #
     run_key, predict_key = random.split(random.PRNGKey(3))
-    n_warm = 200
-    n_samples = 1000
+    n_warm = 500
+    n_samples = 500
     mcmc = MCMC(
         NUTS(prev_model_gp_aggr), 
         num_warmup=n_warm,
@@ -172,7 +192,7 @@ if __name__ == "__main__":
 
     # --------------------------------- Run MCMC --------------------------------- #
     start = time.time()
-    mcmc.run(run_key, args, y = np.array(total_cases))
+    mcmc.run(run_key, args, tested_positive = jnp.array(tested_positive_lo))
     end = time.time()
     t_elapsed_min = round((end - start)/60) 
     print(f"Time taken for aggGP : {t_elapsed_min}'min")

@@ -1,10 +1,13 @@
+import os
 import numpy as np
 import pandas as pd
 import geopandas as gpd 
 import matplotlib.pyplot as plt 
 
 from typing import Tuple, List
+import argparse
 import math
+import yaml
 
 def compute_grid(num_grid_x:Tuple[int],extents:Tuple[float]):
     """
@@ -64,6 +67,20 @@ def pol_pts(df_shp:gpd.GeoDataFrame, grid_pts:gpd.GeoDataFrame):
 
     return([pl_pt, pt_which_pol])
 
+def plot_grid(df:gpd.GeoDataFrame, grid_pts:gpd.GeoDataFrame, file_name:str)->None:
+    """
+    Plots grid points 
+    """
+    fig, ax = plt.subplots(1,1, figsize = (10,10))
+    df.plot(ax = ax, color = "white", edgecolor = "black")
+    grid_pts.plot(ax = ax , marker = "o", color = "red", markersize = 2)
+
+    if not os.path.exists("tmp"):
+        os.mkdir("tmp")
+
+    fig.savefig(os.path.join("tmp", file_name))
+    print("Saving plot in 'tmp'...")
+
 def get_points_in_region(df:gpd.GeoDataFrame, grid_pts:gpd.GeoDataFrame):
     """Returns an array with points that fall regions as well as which point that falls
     on region.
@@ -74,8 +91,9 @@ def get_points_in_region(df:gpd.GeoDataFrame, grid_pts:gpd.GeoDataFrame):
     print("Atleast one point falls on every region !")        
     return pol_pt, pt_which_pol
 
+#todo : We need to replace this with a linear programming optimization code to figure the best grid size
 def check_for_min_points(start_value, end_value, df, extents):
-    """Helper to look for a given configuration wher eatleast one point falls
+    """Helper to look for a given configuration where atleast one point falls
     on every region."""
     num_grid_x = start_value
     for i in range(0,end_value):
@@ -90,21 +108,35 @@ def check_for_min_points(start_value, end_value, df, extents):
             print(num_grid_x)
             num_grid_x += 1
 
-
-
 if __name__ == "__main__":
-    # Load Data
-    df_lo = gpd.read_file("data/processed/low/us_census_divisions/us_census_divisions.shp")
-    df_hi = gpd.read_file("data/processed/high/us_state_divisions/us_state_divisions.shp")
+    # Argument Parser : Read lo/hi shape files
+    parser = argparse.ArgumentParser(description = "Computational Grid")
+    parser.add_argument("-lo_shp_file", type = str, default = "data/processed/low/us_census_divisions/us_census_divisions.shp")
+    parser.add_argument("-hi_shp_file", type = str, default = "data/processed/high/us_state_divisions/us_state_divisions.shp")
+    args = parser.parse_args()
 
-    num_grid_x = 77
+    # Read YAML file to get compute grid 
+    with open("comp_grid_params.yaml") as f:
+        comp_grid_params = yaml.safe_load(f)
+
+    # Load Data 
+    df_lo = gpd.read_file(args.lo_shp_file)
+    df_hi = gpd.read_file(args.hi_shp_file)
+
+    # Number of grid points
+    num_grid_x = comp_grid_params["num_grids_x"]
+
     # Manually look at map and decide on a grid
-    extents = (-125,-67,24.5,49.5)
+    extents = tuple(comp_grid_params["extents"])
     x, grid_pts = compute_grid(num_grid_x, extents)
     print(f"Num Grid Points : {grid_pts.shape}")
 
     pol_pts_hi, pt_which_pol_hi = get_points_in_region(df_hi, grid_pts)
     pol_pts_lo, pt_which_pol_lo = get_points_in_region(df_lo, grid_pts)
+
+    # Plot grid to check if grid is accurate
+    plot_grid(df_hi, grid_pts, file_name = "comp_grid_hi.png")
+    plot_grid(df_lo, grid_pts, file_name = "comp_grid_lo.png")
 
     np.save("data/processed/lat_lon_x", x)
     np.save("data/processed/low/pol_pts_lo",pol_pts_lo)

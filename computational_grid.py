@@ -111,8 +111,8 @@ def check_for_min_points(start_value, end_value, df, extents):
 if __name__ == "__main__":
     # Argument Parser : Read lo/hi shape files
     parser = argparse.ArgumentParser(description = "Computational Grid")
-    parser.add_argument("-lo_shp_file", type = str, default = "data/processed/low/us_census_divisions/us_census_divisions.shp")
-    parser.add_argument("-hi_shp_file", type = str, default = "data/processed/high/us_state_divisions/us_state_divisions.shp")
+    parser.add_argument("-lo_shp_file_p", type = str, default = "data/processed/low/us_census_divisions/us_census_divisions.shp", help = "path to low region shape file")
+    parser.add_argument("-hi_shp_file_p", type = str, default = "data/processed/high/us_state_divisions/us_state_divisions.shp", help = "path to high region shape file")
     args = parser.parse_args()
 
     # Read YAML file to get compute grid 
@@ -120,8 +120,8 @@ if __name__ == "__main__":
         comp_grid_params = yaml.safe_load(f)
 
     # Load Data 
-    df_lo = gpd.read_file(args.lo_shp_file)
-    df_hi = gpd.read_file(args.hi_shp_file)
+    df_lo = gpd.read_file(args.lo_shp_file_p)
+    df_hi = gpd.read_file(args.hi_shp_file_p)
 
     # Number of grid points
     num_grid_x = comp_grid_params["num_grids_x"]
@@ -137,6 +137,8 @@ if __name__ == "__main__":
     # Plot grid to check if grid is accurate
     plot_grid(df_hi, grid_pts, file_name = "comp_grid_hi.png")
     plot_grid(df_lo, grid_pts, file_name = "comp_grid_lo.png")
+
+    print("saving files in 'data/processed'...")
 
     np.save("data/processed/lat_lon_x", x)
     np.save("data/processed/low/pol_pts_lo",pol_pts_lo)

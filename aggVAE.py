@@ -27,8 +27,11 @@ from aggGP import dist_euclid, exp_sq_kernel, M_g
 
 import pickle
 
-jax.config.update("jax_default_device", jax.devices()[1])
-print(f"Jax using device : {jax.devices()}")
+# Check for GPU
+if any(device.platform == "gpu" for device in jax.devices()):
+    jax.config.update("jax_default_device", jax.devices()[1])
+    ax.config.update("jax_default_device", jax.devices())
+    print(f"Jax using device : {jax.devices()}")
 
 
 # ------------------- Func for Prior Predictive Simulation ------------------- #

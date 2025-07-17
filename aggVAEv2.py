@@ -23,6 +23,8 @@ import plotly.express as px
 
 from termcolor import colored 
 from utils import get_comp_grid, exp_sq_kernel, M_g, plot_agg_gps
+import csv
+import json
 import argparse
 import pickle
 
@@ -261,6 +263,33 @@ if __name__ == "__main__":
     )
     args = parser.parse_args()
 
+    # ------------------------------ Results Folder ------------------------------ #
+    save_root = "model_runs"
+    if not os.path.exists(save_root):
+        os.mkdir(save_root)
+
+    fixed_or_fly = "fly" if args.gen_gp_on_fly else "fixed"
+    save_dir = f"aggvae_ep{args.epochs}_h{args.hidden_dim}_z{args.z_dim}_{fixed_or_fly}"
+    
+    if not os.path.exists(os.path.join(save_root,save_dir)):
+        os.mkdir(os.path.join(save_root, save_dir))
+
+    with open(os.path.join(save_root,save_dir,"losses.csv"), mode = "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch","train_loss","valid_loss"])
+
+    # ---------------------------------- Config ---------------------------------- #
+    config = {
+        "hidden_dim" : args.hidden_dim,
+        "z_dim" : args.z_dim, 
+        "n_samples_per_batch" : args.n_samples,
+        "batch_size" : args.n_batches,
+        "epochs" : args.epochs
+    }
+
+    with open(os.path.join(save_root,save_dir,"config.json"), "w") as f:
+        json.dump(config, f, indent = 2)
+
     # -------------------------- Data and Saved Vectors -------------------------- #
     
     grid_data = get_comp_grid(Path(args.data_path))
@@ -286,9 +315,9 @@ if __name__ == "__main__":
     # #plot_agg_gps(prior_gp_draws)
 
     # ------------------------------- Initiate SVI ------------------------------- #
-
+    # Optimizer
     adam = numpyro.optim.Adam(step_size = 0.001)
-
+    # Setup Stochastic Variation Inference
     svi = SVI(
         model,
         guide,
@@ -297,10 +326,10 @@ if __name__ == "__main__":
         hidden_dim = args.hidden_dim,
         z_dim = args.z_dim
     )
-    
+    # Key to initializing svi_state
     svi_key, subkey = random.split(random.PRNGKey(123),2)
     svi_state = svi.init(svi_key, agg_gp_prior)
-    losses = {"train" : [], "valid" : []}
+
     if args.gen_gp_on_fly:
         # ------------------ Train model by sampling Gps on the fly ------------------ #
         # We will be generating samples for inside the function - for batch appraoch look at the else statement
@@ -333,8 +362,10 @@ if __name__ == "__main__":
                 M_lo = pol_pt_lo,
                 M_hi = pol_pt_hi
             )
-            losses["train"].append("train_loss") 
-            losses["valid"].append("valid_loss")
+            # Keep track of metrics
+            with open(os.path.join(save_root,save_dir,"losses.csv"), mode = "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([e, train_loss, valid_loss])
             print(f"train loss : {train_loss:.3f}, valid loss : {valid_loss:.3f}")
     else:
         # --------------------- Train Model on fixed set of GP's --------------------- #
@@ -362,20 +393,23 @@ if __name__ == "__main__":
         trainloader = DataLoader(train_dataset, batch_size = args.n_samples, collate_fn = jax_collate, drop_last = True)
         validloader = DataLoader(valid_dataset, batch_size = args.n_samples, collate_fn = jax_collate, drop_last = True)
 
-        for i in range(args.epochs):
+        for e in range(args.epochs):
+            # Compute train & valid losses
             svi_state, train_loss = epoch_train_fixed_gps(svi_state,trainloader)
             valid_loss = epoch_eval_fixed_gps(svi_state,validloader)
-            losses["train"].append("train_loss") 
-            losses["valid"].append("valid_loss")
+            # Keep track of metrics
+            with open(os.path.join(save_root,save_dir,"losses.csv"), mode = "a", newline="") as f:
+                writer = csv.writer(f)
+                writer.writerow([e, train_loss, valid_loss])
+
             print(f"train loss : {train_loss:.2f}, valid loss : {valid_loss:.2f}")
 
-        # ---------------------------- Save Model Weights ---------------------------- #
+    # ---------------------------- Save Model Weights ---------------------------- #
+
     # save decoder 
-    if not os.path.exists("model_weights"):
-        os.mkdir("model_weights")
     decoder_params = svi.get_params(svi_state)
-    fixed_or_fly = "fly" if args.gen_gp_on_fly else "fixed"
-    f_name = f"aggvae_dec_ep{args.epochs}_h{args.hidden_dim}_z{args.z_dim}_{fixed_or_fly}"
-    print("Saving decoder params in 'model_weighs'...")
-    with open(os.path.join("model_weights",f_name), "wb") as file:
+    dec_name = "dec_weights" 
+
+    print("Saving decoder params in 'model_weights'...")
+    with open(os.path.join(save_root,save_dir, dec_name), "wb") as file:
         pickle.dump(decoder_params, file)

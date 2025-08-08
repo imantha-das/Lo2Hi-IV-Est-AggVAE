@@ -100,7 +100,7 @@ def prev_model_gp_aggr_bin(
             dist.BinomialLogits(total_count=n_tested, logits = lp),
             obs = None
         )
-    return mcmc
+    return n_positive_obs
 
 # ---------------------------- Aggregate Model V2 ---------------------------- #
 def prev_model_gp_aggr_betabin(

@@ -269,7 +269,7 @@ if __name__ == "__main__":
         os.mkdir(save_root)
 
     fixed_or_fly = "fly" if args.gen_gp_on_fly else "fixed"
-    save_dir = f"aggvae_ep{args.epochs}_h{args.hidden_dim}_z{args.z_dim}_{fixed_or_fly}"
+    save_dir = f"aggvae_ep{args.epochs}_h{args.hidden_dim}_z{args.z_dim}_sb{int(args.n_samples*args.n_batches/1000)}k_{fixed_or_fly}"
     
     if not os.path.exists(os.path.join(save_root,save_dir)):
         os.mkdir(os.path.join(save_root, save_dir))
@@ -390,6 +390,7 @@ if __name__ == "__main__":
         train_size = int(len(dataset) * 0.7)
         valid_size = len(dataset) - train_size 
         train_dataset, valid_dataset = torch.utils.data.random_split(dataset, [train_size, valid_size])
+        # batch size is number of samples per batch, cause we have sepetate argument for specyfing the number of batches.
         trainloader = DataLoader(train_dataset, batch_size = args.n_samples, collate_fn = jax_collate, drop_last = True)
         validloader = DataLoader(valid_dataset, batch_size = args.n_samples, collate_fn = jax_collate, drop_last = True)
 

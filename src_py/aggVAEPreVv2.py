@@ -30,7 +30,8 @@ def prev_model_vae_aggr_betabin(
     decoder_params:list,
     noise:float = 1e-4,
     jitter:float = 1e-4,
-    inference = False
+    inference = False,
+    ignore_mu = False,
 ):
     """ 
     Aggregated Gaussian Process VAE model 
@@ -70,14 +71,18 @@ def prev_model_vae_aggr_betabin(
 
     # fixed effects 
     # captures the baseline influenza estimates
-    mu_infz = numpyro.sample("mu_infz", dist.Normal(0,1))
+    if not ignore_mu:
+        mu_infz = numpyro.sample("mu_infz", dist.Normal(0,1))
     # random effects 
     # captures spatial correlation in latent prevelance
     f_gp_approx = vae_gp_aggr
     # covariates : fixed (This is the coefficents of population covariants)
     beta = numpyro.sample("beta", dist.Normal(0,1))
     # Logists revelence
-    logits_prev = mu_infz + f_gp_approx + beta * pop
+    if not ignore_mu:
+        logits_prev = mu_infz + f_gp_approx + beta * pop
+    else:
+        logits_prev = f_gp_approx + beta * pop
     #  prevalence values (out target,y)
     prev = numpyro.deterministic("theta", jax.nn.sigmoid(logits_prev))
     # Hyperparams for Beta-Binomial Distibution
@@ -127,9 +132,10 @@ def show_mcmc_diagnostics(ss, n_regn_lo, n_regn_hi):
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description = "Run train decoder to get low dimension GPs to compute prevalence")
     parser.add_argument("--data_path", type = str, default = "data/processed", help = "Path to directory with data and saved vectors")
-    parser.add_argument("--vae_pretrain_rt", type = str, default = "model_runs/aggvae_ep20_h50_z40_fixed")
+    parser.add_argument("--vae_pretrain_rt", type = str, default = "model_runs/aggvae_ep20_h50_z40_sb10k_fixed")
     parser.add_argument("--n_warmup", type = int, default = 500)
     parser.add_argument("--n_samples", type = int, default = 500)
+    parser.add_argument("--ignore_mu",action="store_true", help = "ignore mu of the linear predictor")
     args = parser.parse_args()
     # -------------------------- Data and Saved Vectors -------------------------- #
     grid_data = get_comp_grid(Path(args.data_path))
@@ -150,8 +156,13 @@ if __name__ == "__main__":
     # Read population 
     pop_lo = pd.read_csv(Path(args.data_path) / "low" / "census_popn.csv")
     pop_hi = pd.read_csv(Path(args.data_path) / "high" / "state_popn.csv")
+    pop_lo.rename(columns= {"division" : "area"}, inplace = True)
+    pop_hi.rename(columns= {"state" : "area"}, inplace = True)
+    # Join population data to geodataframes
+    df_lo = df_lo.merge(pop_lo, on="area", how="left")
+    df_hi = df_hi.merge(pop_hi, on="area", how="left")
     scaler = MinMaxScaler()
-    pop = scaler.fit_transform(np.concatenate([pop_lo["tot_popn"].values, pop_hi["tot_popn"].values]).reshape(-1,1))
+    pop = scaler.fit_transform(np.concatenate([df_lo["tot_popn"].values, df_hi["tot_popn"].values]).reshape(-1,1))
     n_popn_lo:Float[Array, "n_regions_lo"] = jnp.array(pop[:pop_lo.shape[0]].ravel())
     n_popn_hi:Float[Array, "n_regions_hi"] = jnp.array(pop[pop_lo.shape[0]:].ravel())
 
@@ -210,7 +221,8 @@ if __name__ == "__main__":
         M_lo = pol_pt_lo, 
         M_hi = pol_pt_hi, 
         decoder_params = decoder_params,
-        inference = True
+        inference = True,
+        ignore_mu = args.ignore_mu,
     )
 
     n_positive_obs_mean = prev_pos_samples["n_positive_obs"].mean(axis = 0)
@@ -223,5 +235,19 @@ if __name__ == "__main__":
     df_hi["prev_pred"] = theta_pos_mean[n_regn_lo:n_regn_lo+n_regn_hi]
 
     print(f"Saving results ar : {args.vae_pretrain_rt}")
-    df_lo.to_csv(os.path.join(args.vae_pretrain_rt,"lo_preds.csv"), index = False)
-    df_hi.to_csv(os.path.join(args.vae_pretrain_rt,"hi_preds.csv"), index = False)
+    if args.ignore_mu:
+        name_lo = "lo_preds_nomu"
+        name_hi = "hi_preds_nomu"
+    else:
+        name_lo = "lo_preds"
+        name_hi = "hi_preds"
+
+    df_lo.to_csv(os.path.join(args.vae_pretrain_rt,name_lo + ".csv"), index = False)
+    df_hi.to_csv(os.path.join(args.vae_pretrain_rt,name_hi + ".csv"), index = False)
+    # Save geodataframe as shape files for visualization
+    if not os.path.exists(os.path.join(args.vae_pretrain_rt, name_lo)):
+        os.mkdir(os.path.join(args.vae_pretrain_rt, name_lo))
+    df_lo.to_file(os.path.join(args.vae_pretrain_rt,name_lo, name_lo + ".shp"))
+    if not os.path.exists(os.path.join(args.vae_pretrain_rt, name_hi)):
+        os.mkdir(os.path.join(args.vae_pretrain_rt, name_hi))
+    df_hi.to_file(os.path.join(args.vae_pretrain_rt,name_hi,name_hi + ".shp"))

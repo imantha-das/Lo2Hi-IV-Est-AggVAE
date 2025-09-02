@@ -1,0 +1,4 @@
+notebooks/*
+notebooks2/*
+src/__pycache__/*
+things_to_try_out.md

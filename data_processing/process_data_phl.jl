@@ -17,8 +17,8 @@ select!(df_shp_hi, [:region,:area_land,:area_water, :geometry])
 
 # --------------------------------- Flu Data --------------------------------- #
 
-flu_lo_p = "data/raw/fluview_census_yr10to25/ICL_NREVSS_Public_Health_Labs.csv"
-flu_hi_p = "data/raw/fluview_state_yr12to25/ICL_NREVSS_Public_Health_Labs.csv"
+flu_lo_p = "data/raw/fluview/fluview_census_yr15to25/ICL_NREVSS_Public_Health_Labs.csv"
+flu_hi_p = "data/raw/fluview/fluview_state_yr15to24/ICL_NREVSS_Public_Health_Labs.csv"
 df_flu_lo = CSV.read(flu_lo_p, DataFrame; header=2)
 df_flu_hi = CSV.read(flu_hi_p, DataFrame; header=2)
 new_col_names = Dict(
@@ -106,6 +106,31 @@ df_flu_hi_aggr = combine(
 
 # Remove year 2025 form low resolution regions as it doesnt exist in high resolution regions 
 filter!(:year => !=(2025), df_flu_lo_aggr)
+# ------------------------- Plot polulations per year ------------------------ #
+using CairoMakie 
+set_theme!(theme_light())
+
+year = 2024 
+strain = "tested_pos"
+
+begin
+    df_flu_lo_yr = filter(:year => ==(year), df_flu_lo_aggr)
+    df_flu_hi_yr = filter(:year => ==(year), df_flu_hi_aggr)
+    x = vcat(df_flu_lo_yr.region, df_flu_hi_yr.region) #(58,)
+    y_lo = df_flu_lo_yr[!, strain] #(9,)
+    y_hi = df_flu_hi_yr[!, strain] #(49,)
+    pos_lo = 1:nrow(df_flu_lo_yr) #1:9
+    pos_hi = (nrow(df_flu_lo_yr) + 1) : (nrow(df_flu_lo_yr) + nrow(df_flu_hi_yr)) #10:58
+
+    f = Figure(size = (1000, 600))
+    ax = Axis(f[1,1], title = "Total Influenza Cases for Year:$year", xlabel = "Region", ylabel = "Total Cases Positive")
+    ax.xticks = (1:length(x), x)
+    ax.xticklabelrotation = pi/4
+    barplot!(ax, pos_lo, y_lo, color = :blue)
+    barplot!(ax, pos_hi, y_hi, color = :orange)
+    f
+end
+
 # -------------------------- Save DataFrames as CSV -------------------------- #
 save_root = "data/processed/nrevss_phl_20152024"
 if !isdir(save_root)

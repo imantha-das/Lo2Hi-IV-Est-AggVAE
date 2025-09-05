@@ -7,6 +7,7 @@ import Shapefile
 using CairoMakie
 import GeoMakie
 import GeometryOps
+using ArchGDAL: IGeometry
 
 # Load Shape file for further processing
 shp_root = "data/interim/county_edited"
@@ -74,3 +75,62 @@ if !isdir(save_root)
 end 
 
 GeoDataFrames.write(joinpath(save_root, "county_grid.shp"), gdf)
+
+# -------------------------- Compute Polygon Points -------------------------- #
+# We are doing the inverse, given a grid point can we find which polygon 
+# This is useful when we look at larger state areas, as many counties makeup a state or census level
+coords = [(row.centroid_x, row.centroid_y) for row in eachrow(gdf)]
+poly_regions = gdf.geometry
+
+@doc """
+Computes which points fall into which polygons 
+Inputs 
+    - coords : Lat/Lon value of points 
+    - poly_regions : Regions expressed as geometry object
+Outputs
+    - pol_pts : A 
+"""->
+function compute_pts_polygons(coords::Vector{Tuple{Float64,Float64}},poly_regions::Vector{IGeometry}) 
+    n_pol = length(poly_regions)
+    n_pts = length(coords)
+    pol_pts = zeros(Int, (n_pol, n_pts))
+    pt_which_pol = zeros(Int, n_pts)
+
+    # Loop through polygons i.e 1..9
+    for i_pol = 1:n_pol
+        pol = poly_regions[i_pol]
+        for j_pt = 1:n_pts
+            pt = coords[j_pt]
+            if LibGEOS.contains(pol,pt)
+                pol_pts[i_pol, j_pt] = 1
+                pt_which_pol[j_pt] = i_pol
+            end
+        end
+    end
+    return pol_pts, pt_which_pol
+end
+
+pol_pts, pt_which_pol = compute_pts_polygons(coords, poly_regions)
+
+n_pol = nrow(gdf) #3107 grid points 
+n_pts = length(coords) #3107 grid point
+pl_pt = zeros(Int,(n_pol, n_pts))
+pt_which_pol = zeros(Int,n_pts)
+
+
+for i_pol in 1:n_pol
+    pol = poly_regions[i_pol]
+    for j_pt in 1:n_pts 
+        pt = coords[j_pt]
+        if LibGEOS.contains(pol,pt)
+            pl_pt[i_pol, j_pt] = 1 # matrix just say if pt is contained within region, note the is [n_regions, n_points]
+            pt_which_pol[j_pt] = i_pol
+        end
+    end 
+end
+
+
+
+
+    
+

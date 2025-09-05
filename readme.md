@@ -26,3 +26,11 @@
         - `--n_warmup` : number of warmup samples for MCMC
         - `--n_samples` : number of MCMC posterior samples 
         - `--ignore_mu` : consider only random effects and covariates and avoid fixed effects.
+
+# GP & Grid Point Visualization 
+
+## Grid Points (at county level)
+![County Grids](plots/county_grids.png)
+
+## GP aggregated across regions
+![Agg GP](plots/gp_county_grid.png)

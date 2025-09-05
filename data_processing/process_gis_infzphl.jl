@@ -22,9 +22,9 @@ cnts = countmap(df_shp_hi.region)
 # Michigan and Virginia have duplicates 
 duplicate_regions = [x for x in keys(cnts) if cnts[x] > 1] 
 michigan_idxs = findall(df_shp_hi.region .== "Michigan") 
-deleteat!(df_shp_hi, michigan_idxs[2])
+deleteat!(df_shp_hi, michigan_idxs[1])
 virginia_idxs = findall(df_shp_hi.region .== "Virginia")
-deleteat!(df_shp_hi, virginia_idxs[2])
+deleteat!(df_shp_hi, virginia_idxs[1])
 # Save processed DataFrames as shapefiles 
 if !isdir("data/processed/gis/low_v2")
     mkpath("data/processed/gis/low_v2")

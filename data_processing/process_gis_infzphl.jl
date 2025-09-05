@@ -3,6 +3,7 @@ Pkg.activate("jl_env/lo2hi")
 using DataFrames 
 import GeoDataFrames
 import CSV 
+using StatsBase: countmap
 
 
 # -------------------------------- Shape Files ------------------------------- #
@@ -10,11 +11,29 @@ shp_lo_p = "data/interim/census_edited/us_mainland_census_crs4326.shp"
 shp_hi_p = "data/interim/state_edited/us_mainland_state_crs4326.shp"
 df_shp_lo = GeoDataFrames.read(shp_lo_p)
 df_shp_hi = GeoDataFrames.read(shp_hi_p)
-rename!(df_shp_lo, :NAME => :region, :ALAND => :area_land, :AWATER => :area_water)
-rename!(df_shp_hi, :NAME => :region, :ALAND => :area_land, :AWATER => :area_water)
-select!(df_shp_lo, [:region,:area_land,:area_water, :geometry])
-select!(df_shp_hi, [:region,:area_land,:area_water, :geometry])
 
+rename!(df_shp_lo, :NAME => :region, :DIVISIONCE => :divisionce, :AFFGEOID => :affgeoid, :ALAND => :area_land, :AWATER => :area_water)
+rename!(df_shp_hi, :NAME => :region, :STATEFP => :statefp, :AFFGEOID => :affgeoid, :ALAND => :area_land, :AWATER => :area_water)
+select!(df_shp_lo, [:region,:divisionce, :affgeoid, :area_land,:area_water, :geometry])
+select!(df_shp_hi, [:region,:statefp,:affgeoid,:area_land,:area_water, :geometry])
+
+# df_shp_hi seems to have some duplicate values that we need removing 
+cnts = countmap(df_shp_hi.region)
+# Michigan and Virginia have duplicates 
+duplicate_regions = [x for x in keys(cnts) if cnts[x] > 1] 
+michigan_idxs = findall(df_shp_hi.region .== "Michigan") 
+deleteat!(df_shp_hi, michigan_idxs[2])
+virginia_idxs = findall(df_shp_hi.region .== "Virginia")
+deleteat!(df_shp_hi, virginia_idxs[2])
+# Save processed DataFrames as shapefiles 
+if !isdir("data/processed/gis/low_v2")
+    mkpath("data/processed/gis/low_v2")
+end
+GeoDataFrames.write("data/processed/gis/low_v2/census.shp", df_shp_lo)
+if !isdir("data/processed/gis/high_v2")
+    mkpath("data/processed/gis/high_v2")
+end
+GeoDataFrames.write("data/processed/gis/high_v2/states.shp", df_shp_hi)
 # --------------------------------- Flu Data --------------------------------- #
 
 flu_lo_p = "data/raw/fluview/fluview_census_yr15to25/ICL_NREVSS_Public_Health_Labs.csv"
@@ -138,3 +157,6 @@ if !isdir(save_root)
 end
 CSV.write(joinpath(save_root, "infz_census_20152024.csv"), df_flu_lo_aggr)
 CSV.write(joinpath(save_root, "infz_state_20152024.csv"), df_flu_hi_aggr)
+
+
+

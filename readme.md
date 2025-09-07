@@ -32,5 +32,5 @@
 ## Grid Points (at county level)
 ![County Grids](plots/county_grids.png)
 
-## GP aggregated across regions
-![Agg GP](plots/gp_county_grid.png)
+## Prior Predictive Distribution over Regions
+![Prior Preds](plots/prev_prior_pred_dist.png)

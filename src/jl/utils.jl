@@ -1,6 +1,10 @@
 module Utils 
 
-export dist_euclid, exp_sq_kernel, M_g, compute_pts_polygons, plot_map_with_points, plot_ax_with_points
+(export 
+dist_euclid, exp_sq_kernel, M_g, compute_pts_polygons, 
+plot_map_with_points, plot_ax_with_points, plot_gp_aggr,
+plot_popn_region
+)
 # Imports
 using LinearAlgebra: I
 using ArchGDAL: IGeometry, wkbPolygon
@@ -11,6 +15,7 @@ using GeoMakie: GeoAxis, poly!
 import ColorSchemes
 set_theme!(theme_light())
 
+# ----------------------- Computational Grid Functions ----------------------- #
 # Eucledian Distance
 @doc """
 Computes the eucledian distance between regions, this funvtion
@@ -89,7 +94,21 @@ function compute_pts_polygons(coords, poly_regions)
     return pol_pts, pt_which_pol
 end
 
+# Aggregate points in region func
+@doc"""
+Used to aggregated values per region 
+Inputs 
+    - M : Matrix with binary entries $m_{ij}, $ showing whether point $j$ is in polygon $i$
+        - shape : (n_regions, n_grd_pts) ; e.g : (9, 2618)
+        - This is the variable pol_pt_lo or pol_pt_hi
+    - g : Is a vector of GP draws over the grid
+        - shape : (n_grd_pts,) ; e.g (2618,)
+        - This is the gp function
+    - matmul(M,g) gives a vector sum over each polygon
+"""->
+M_g(M,g) = M * g #(n_regions,) e.g (9,)
 
+# -------------------------- Visialization Functions ------------------------- #
 @doc """
 Plots a Map with the computational grid 
 Inputs 
@@ -130,7 +149,7 @@ end
 @doc """
 Same as `plot_map_with_points` but inputs an ax, useful for creating
 subplots 
-"""
+"""->
 function plot_ax_with_points(ax, polys, pts::Matrix, pt_which_pol::Vector{Int64}, color::Symbol; col_by_reg::Bool = false)
     poly!(
         ax, 
@@ -150,21 +169,91 @@ function plot_ax_with_points(ax, polys, pts::Matrix, pt_which_pol::Vector{Int64}
     return ax
 end
 
-
-# Aggregate points in region func 
-@doc"""
-Used to aggregated values per region 
+@doc """
+Plots an aggregated GP 
 Inputs 
-    - M : Matrix with binary entries $m_{ij}, $ showing whether point $j$ is in polygon $i$
-        - shape : (n_regions, n_grd_pts) ; e.g : (9, 2618)
-        - This is the variable pol_pt_lo or pol_pt_hi
-    - g : Is a vector of GP draws over the grid
-        - shape : (n_grd_pts,) ; e.g (2618,)
-        - This is the gp function
-    - matmul(M,g) gives a vector sum over each polygon
+- gp_aggr : aggregated gp with shape (n_lo+n_hi,)
+- regions : String values of regions to be used as xticks 
+- n_reg_lo : Number of regions in low resolution administrative boundaries (i.e 9 census regions)
+- n_reg_hi : Number of regions in high resolution administrative boundaries (i.e 49 state regions)
+- kernel_name : Name of kernel (i.e RBF) to be used in the title
 """->
-M_g(M,g) = M * g #(n_regions,) e.g (9,)
+function plot_gp_aggr(gp_aggr::Matrix{Float64}, regions::Vector{String};n_reg_lo::Int = 9, n_reg_hi::Int = 49, title::String = "Aggregated Latent GP Realizations (RBF)")
+    fig = Figure(size = (1200,400), )
+    ax = Axis(fig[1,1])
+    for i = 1:size(gp_aggr,2)
+        lines!(ax,1:size(gp_aggr,1), gp_aggr[:,i], color = (:black,0.3))
+    end
+    vspan!(ax, [0],[n_reg_lo], color =(:dodgerblue2, 0.3), label = "low resolution")
+    vspan!(ax, [n_reg_lo], [n_reg_lo + n_reg_hi], color = (:darkolivegreen,0.2),label = "high resolution")
+    axislegend(positon = :rt)
+    ax.title = title
+    ax.xticks = (1:n_reg_lo + n_reg_hi, regions)
+    ax.xticklabelrotation = 45 
+    return fig
+end
 
+@doc """
+Plot population by region 
+Inputs
+    - census/state_polys : census/state level geometries
+    - census/state_pop : census/state population
+    - region_lo or region_hi : region names 
+    - year : year the population was taken
+"""->
+function plot_popn_region(census_polys, state_polys, census_pop, state_pop, regions_lo, regions_hi, year)
+    fig = Figure(size = (1200,800))
+    census_centroid = GeometryOps.centroid(census_polys)
+    ax1 = GeoAxis(
+        fig[1,1],
+        dest ="+proj=ortho +lon_0=$(census_centroid[1]) +lat_0=$(census_centroid[2])",
+        title = "Census population"
+    )
+    po1 = poly!(
+        ax1,
+        census_polys,
+        color = census_pop,
+        strokecolor = :black, strokewidth = 2
+    )
+    Colorbar(fig[1,2], po1)
+
+    ax2 = GeoAxis(
+        fig[1,3],
+        dest ="+proj=ortho +lon_0=$(census_centroid[1]) +lat_0=$(census_centroid[2])",
+        title = "State population"
+    )
+    po2 = poly!(
+        ax2,
+        state_polys,
+        color = state_pop,
+        strokecolor = :black, strokewidth = 2
+    )
+    Colorbar(fig[1,4], po2)
+
+    ax3 = Axis(
+        fig[2,1:4], title = "Combined Census and State Population for $year "
+    )
+    regions = vcat(regions_lo, regions_hi)
+    ax3.xticks = (1:length(regions), regions)
+    ax3.xticklabelrotation = 45 
+    barplot!(ax3,vcat(census_pop,state_pop))
+    return fig
+end
+
+@doc """
+Plot raw gps, not the one aggreagted
+"""->
+function plot_gps(gps)
+    n_samples = size(gps,2)
+    fig = Figure()
+    ax = Axis(fig[1,1], title = "Gp at each grid point")
+    for i in 1:n_samples
+        lines!(ax,1:size(gps,1),gps[:,i], color = (:black, 0.2))
+    end 
+    return fig 
+end
+
+# ----------------------------------- Main ----------------------------------- #
 # Main - Just to test the Utils module
 if abspath(PROGRAM_FILE) == @__FILE__
     using .Utils
@@ -184,4 +273,7 @@ if abspath(PROGRAM_FILE) == @__FILE__
     
 end
 end
+
+
+
 

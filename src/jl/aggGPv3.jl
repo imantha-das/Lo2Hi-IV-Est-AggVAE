@@ -25,7 +25,7 @@ end
 #if abspath(PROGRAM_FILE) == @__FILE__ 
 # ------------------------------------ GiS ----------------------------------- #
 # Load county : Grid Points will be at this level
-county_fold = "data/processed/gis/county_grid"
+county_fold = "data/processed/gis/county_grid_pop_v2"
 county_files = filter(x -> endswith(x, ".shp"), readdir(county_fold))
 county_path = joinpath(county_fold, first(county_files))
 df_county = GeoDataFrames.read(county_path)
@@ -111,9 +111,42 @@ plot_ax_with_points(ax_hi,state_polys, pts, pt_which_pol_hi, :darkolivegreen)
 fig3
 save("plots/county_grids.png",fig3)
 
+# ----------------------------- Population Matrix ---------------------------- #
+x_pop = df_county[!, :pop2021]
+x_pop_mat = x_pop ./ sum(x_pop)
+polys = df_county.geometry
+
+f = Figure(size = (1200,800))
+us_centroid = GeometryOps.centroid(polys)
+ax = GeoAxis(
+    f[1,1],
+    dest = "+proj=ortho +lon_0=$(us_centroid[1]) +lat_0=$(us_centroid[2])",
+    title = "County level population"
+)
+poly!(
+    ax, 
+    polys, 
+    color = (:lightgray, 1.0)
+)
+CairoMakie.Colorbar(
+    f[1,2], 
+    limits = extrema(log.(x_pop_mat .+ 1e-6)),
+    label = "log.(pₓ/Σpₓ)",
+    colormap = :viridis
+)
+sizes = 4 .+ 30 .* (x_pop_mat ./ maximum(x_pop_mat))
+scatter!(
+    ax, pts[:,1], pts[:,2], 
+    markersize = sizes, 
+    color = log.(x_pop_mat .+ 1e-6), 
+    colormap = :viridis, 
+    colorrange = extrema(log.(x_pop_mat .+ 1e-6))
+)
+f
+
 # ---------------------------- Gaussian Processes ---------------------------- #
 
-x = copy(pts) #(3107,2)
+x = copy(pts) #(3120,2)
 k = SEKernel()
 f = GP(k)
 x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)]
@@ -135,20 +168,39 @@ n_samples = 100
 μp = rand(Normal(0,1), n_samples)
 p_logits = reshape(μp, (1,100)) .+ gp_aggr 
 p = logistic.(p_logits)
-
-
 fig5= plot_gp_aggr(p, regions, title = "Aggregated Gps")
+
+p_logits_lo = reshape(μp, (1,n_samples)) .+ gp_aggr_lo 
+p_logits_hi = reshape(μp, (1,n_samples)) .+ gp_aggr_hi
+p_lo = logistic.(p_logits_lo) 
+p_hi = logistic.(p_logits_hi)
+fig_51 = plot_gp_aggr(vcat(p_lo,p_hi), regions, title = "Aggreated Gps, Normalised seperately")
+fig_51
 #save("plots/gp_county_grid.png", fig5)
 
 # ----------------------------- Agg Prev Process ----------------------------- #
 n_samples = 100
 μp = rand(Normal(0,1), n_samples)
-p_logits =  reshape(μp, (1,100)) .+ f_reals
+p_logits =  reshape(μp, (1,100)) .+ f_reals #(3107,n_samples)
 p = logistic.(p_logits)
-p_lo = M_g(pol_pts_lo, p)
-p_hi = M_g(pol_pts_hi, p)
+p_lo = M_g(pol_pts_lo, p) #(9,n_samples)
+p_hi = M_g(pol_pts_hi, p) #(49,n_samples)
 fig6 = plot_gp_aggr(vcat(p_lo,p_hi),regions, title = "Prevelance Prior Predictive Dist : σ(μ_prev + gp) * M_region_agg")
-save("plots/prev_prior_pred_dist.png",fig6)
+plot_gp_aggr(logistic.(vcat(p_lo,p_hi)), regions, title = "Prevelance Prior logistic")
+save("plots/prev_prior_pred_dist_popweighted.png",fig7)
+p_lo[:,1] |> sum
+
+# --------------------------- Population weighting --------------------------- #
+n_samples = 100
+μp = rand(Normal(0,1), n_samples)
+p_logits =  reshape(μp, (1,100)) .+ f_reals #(3107,n_samples)
+p = logistic.(p_logits)
+p_weighted = p .* x_pop_mat
+p_lo = M_g(pol_pts_lo, p_weighted) #(9,n_samples)
+p_hi = M_g(pol_pts_hi, p_weighted) #(49,n_samples)
+fig7 = plot_gp_aggr(vcat(p_lo,p_hi),regions, title = "Prevelance Prior Predictive Dist Weighted : σ(μ_prev + gp) * M_region_agg")
+plot_gp_aggr(logistic.(vcat(p_lo,p_hi)), regions, title = "Prevelance Prior logistic")
+
 # --------------------------------- Infz Data -------------------------------- #
 
 n_tested_lo = Vector{Int64}(df_lo[!,:test_cases])
@@ -157,105 +209,19 @@ n_positive_lo = Vector{Int64}(df_lo[!,:tested_pos])
 n_positive_hi = Vector{Int64}(df_hi[!, :tested_pos])
 
 fig4 = Figure()
-ax4 = Axis(fig3[1,1])
+ax4 = Axis(fig4[1,1])
 barplot!(ax4, vcat(n_tested_lo, n_tested_hi), label = "num_tested")
 barplot!(ax4, vcat(n_positive_lo,n_positive_hi), label = "num_tested_positive")
-axislegend(position = :rt)
+axislegend(ax4,position = :rt)
 ax4.xticks = (1:length(regions), regions)
 ax4.xticklabelrotation = 45
 fig4
 
 # ------------------------------ Binomial Models ----------------------------- #
 
-@model function prev_gp_aggr_bin_v1(
+@model function prev_gp_aggr_bin(
     x::Matrix{Float64},
-    M_lo::Matrix{Int64},
-    M_hi::Matrix{Int64},
-    n_tested_lo::Vector{Int64},
-    n_tested_hi::Vector{Int64},
-    n_positive_lo::Vector{Int64};
-    jitter::Float64 = 1e-4
-)
-    # Compute GP realization
-    x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)] #3107 - Vector{Svector{2,}}
-    k = SEKernel()
-    f = GP(k)
-    f_latent ~ f(x_svec, jitter)
-    # Aggregate based on points falling on regions 
-    gp_aggr_lo = M_g(M_lo, f_latent)
-    gp_aggr_hi = M_g(M_hi, f_latent)
-    gp_aggr = vcat(gp_aggr_lo, gp_aggr_hi) 
-    # Prevalence model 
-    b0 ~ Normal(0,1) # mean prevalence 
-    logits = @. b0 + gp_aggr # linear predictor for prevalence 
-    p = logistic.(logits)
-
-    n_tested = vcat(n_tested_lo, n_tested_hi) #(58,)
-    n_regions_lo = size(n_tested_lo,1) # 9
-    n_regions_hi = size(n_tested_hi,1) # 49
-    n_regions = n_regions_lo + n_regions_hi
-    n_positive = vcat(n_positive_lo, fill(missing, n_regions_hi)) #(58,)
-    for i = 1:n_regions
-        n_positive[i] ~ Binomial(n_tested[i], p[i]) 
-    end
-    return (
-        fx = f(x_svec, jitter),
-        f_latent = f_latent,
-        gp_aggr_lo = gp_aggr_lo,
-        gp_aggr_hi = gp_aggr_hi,
-        p = p,
-        n_postive = n_positive,
-    )
-end
-
-@model function prev_gp_aggr_bin_v2(
-    x::Matrix{Float64},
-    M_lo::Matrix{Int64},
-    M_hi::Matrix{Int64},
-    n_tested_lo::Vector{Int64},
-    n_tested_hi::Vector{Int64},
-    n_positive_lo::Vector{Int64};
-    jitter::Float64 = 1e-4
-)
-    # Compute GP realization
-    x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)] #3107 - Vector{Svector{2,}}
-    k = SEKernel()
-    f = GP(k)
-    f_latent ~ f(x_svec, jitter)
-    # Aggregate based on points falling on regions 
-    gp_aggr_lo = M_g(M_lo, f_latent)
-    gp_aggr_hi = M_g(M_hi, f_latent)
-    gp_aggr = vcat(gp_aggr_lo, gp_aggr_hi) 
-    # Prevalence model 
-    b0 ~ Normal(0,1) # mean prevalence 
-    logits = @. b0 + gp_aggr # linear predictor for prevalence 
-    p = logistic.(logits)
-
-    n_regions_lo = size(n_tested_lo,1) # 9
-    n_regions_hi = size(n_tested_hi,1) # 49
-
-    # observed low regions
-    for i = 1:n_regions_lo
-        n_positive_lo[i] ~ Binomial(n_tested_lo[i], p[i]) 
-    end
-    # unobserved high regions 
-    n_positive_hi ~ arraydist([
-        Binomial(n_tested_hi[j], p[n_regions_lo+j])
-        for j in 1:n_regions_hi
-    ])
-    return (
-        fx = f(x_svec, jitter),
-        f_latent = f_latent,
-        gp_aggr_lo = gp_aggr_lo,
-        gp_aggr_hi = gp_aggr_hi,
-        p = p,
-        n_postive_lo = n_positive_lo,
-        n_positive_hi = n_positive_hi
-    )
-end
-
-@model function prev_gp_aggr_bin_v3(
-    x::Matrix{Float64},
+    x_pop::Vector{Float64},
     M_lo::Matrix{Int64},
     M_hi::Matrix{Int64},
     n_tested_lo::Vector{Int64},
@@ -272,10 +238,12 @@ end
     μp ~ Normal(0,1) # mean prevalence 
     logits = @. μp + f_latent # (n_pts,) linear predictor for prevalence 
     p = logistic.(logits)
+    # Weighted prevalence 
+    pw = p .* x_pop
     # Aggregate based on points falling on regions 
     #* We are aggragting prevalence instead of gp
-    p_aggr_lo = M_g(M_lo, p)
-    p_aggr_hi = M_g(M_hi, p)
+    p_aggr_lo = M_g(M_lo, pw)
+    p_aggr_hi = M_g(M_hi, pw)
     p_aggr = vcat(p_aggr_lo, p_aggr_hi) 
 
     n_tested = vcat(n_tested_lo, n_tested_hi) #(58,)
@@ -293,8 +261,132 @@ end
         n_postive = n_positive,
     )
 end
-model = prev_gp_aggr_bin_v3(x,pol_pts_lo,pol_pts_hi,n_tested_lo,n_tested_hi,n_positive_lo)
-posterior_samples = sample(model, MH(), 5)
-postrior_df = posterior_samples |> DataFrame
 
-postrior_df."f_latent[35]"
+@model function prev_gp_aggr_betabin(
+    x::Matrix{Float64},
+    x_pop::Vector{Float64},
+    M_lo::Matrix{Int64},
+    M_hi::Matrix{Int64},
+    n_tested_lo::Vector{Int64},
+    n_tested_hi::Vector{Int64},
+    n_positive_lo::Vector{Int64};
+    jitter::Float64 = 1e-4
+)
+    # GP realization
+    x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)]
+    k = SEKernel()
+    f = GP(k)
+    f_latent ~ f(x_svec, jitter) # (n_pts,)
+
+    # Prevalence model
+    μp ~ Normal(0, 1)             # mean prevalence
+    logits = @. μp + f_latent
+    p = logistic.(logits)         # (n_pts,)
+
+    # Overdispersion for Beta-Binomial
+    ϕ ~ Exponential(1.0)          # phi > 0
+
+    # Weighted prevalence
+    pw = p .* x_pop
+
+    # Aggregate based on points falling on regions
+    p_aggr_lo = M_g(M_lo, pw)
+    p_aggr_hi = M_g(M_hi, pw)
+    p_aggr = vcat(p_aggr_lo, p_aggr_hi)
+
+    n_tested = vcat(n_tested_lo, n_tested_hi)
+    n_regions_lo = size(n_tested_lo, 1)
+    n_regions_hi = size(n_tested_hi, 1)
+    n_regions = n_regions_lo + n_regions_hi
+    n_positive = vcat(n_positive_lo, fill(missing, n_regions_hi))
+
+    for i = 1:n_regions
+        α = p_aggr[i] * ϕ + 1e-5  # small jitter to avoid zero
+        β = (1 - p_aggr[i]) * ϕ + 1e-5
+        n_positive[i] ~ BetaBinomial(n_tested[i], α, β)
+    end
+
+    return (
+        fx = f(x_svec, jitter),
+        f_latent = f_latent,
+        p_aggr = p_aggr,
+        n_positive = n_positive,
+        phi = ϕ
+    )
+end
+
+@model function prev_gp_aggr_betabin_v2(
+    x::Matrix{Float64},
+    x_pop::Vector{Float64},
+    M_lo::Matrix{Int64},
+    M_hi::Matrix{Int64},
+    n_tested_lo::Vector{Int64},
+    n_tested_hi::Vector{Int64},
+    n_positive_lo::Vector{Int64};
+    jitter::Float64 = 1e-4
+)
+    # GP realization
+    x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)]
+    k = SEKernel()
+    f = GP(k)
+    f_latent ~ f(x_svec, jitter) # (n_pts,)
+
+    # Prevalence model
+    μp ~ Normal(0, 1)             # mean prevalence
+    logits = @. μp + f_latent
+    p = logistic.(logits)         # (n_pts,)
+
+    # Overdispersion for Beta-Binomial
+    ϕ ~ Exponential(1.0)          # phi > 0
+
+    # Weighted prevalence
+    pw = p .* x_pop
+
+    # Aggregate based on points falling on regions
+    p_aggr_lo = M_g(M_lo, pw)
+    p_aggr_hi = M_g(M_hi, pw)
+
+    n_regions_lo = size(n_tested_lo, 1)
+    n_regions_hi = size(n_tested_hi, 1)
+
+    for i = 1:n_regions_lo
+        α = p_aggr_lo[i] * ϕ + 1e-5  # small jitter to avoid zero
+        β = (1 - p_aggr_lo[i]) * ϕ + 1e-5
+        n_positive_lo[i] ~ BetaBinomial(n_tested_lo[i], α, β)
+    end
+
+    # SInce we are creating this vector inside Turing will not condition on them 
+    n_positive_hi = Vector{Int}(undef, length(n_tested_hi))
+    for i = 1:n_regions_hi 
+        α = p_aggr_hi[i] * ϕ + 1e-5 
+        β = (1 - p_aggr_hi[i]) * ϕ + 1e-5
+        n_positive_hi[i] ~ BetaBinomial(n_tested_hi[i], α, β)
+    end
+
+    return (
+        fx = f(x_svec, jitter),
+        f_latent = f_latent,
+        p_aggr_lo = p_aggr_lo,
+        p_aggr_hi = p_aggr_hi,
+        n_positive_lo = n_positive_lo,
+        n_positive_hi = n_positive_hi,
+        phi = ϕ
+    )
+end
+
+
+model = prev_gp_aggr_betabin_v2(
+    x,
+    x_pop_mat,
+    pol_pts_lo,
+    pol_pts_hi,
+    n_tested_lo,
+    n_tested_hi,
+    n_positive_lo
+)
+posterior_samples = sample(model, NUTS(5,0.65), 100)
+pos_df = posterior_samples |> DataFrame
+pos_df."f_latent[59]"
+pos_df."n_positive[3]"
+
+# -------------------------------- Predictions ------------------------------- #

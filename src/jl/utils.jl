@@ -94,6 +94,48 @@ function compute_pts_polygons(coords, poly_regions)
     return pol_pts, pt_which_pol
 end
 
+@doc """
+Computes if point falls in polygon 
+This function also takes into account mutiple polygons corresponding 
+to one region. For example data/processed/v3/census/census.shp 
+contains multiple polygons for one region (i.e New England containing 5 regions)
+But we want all points falling in these 5 regions to account for 1 region (New England)
+This is done through looping across all regions and mapping them to 1 region. 
+Inputs 
+    - coords : lat/lon points as a vector of tuples 
+    - df_reg : df_hi or df_lo as a GeoDataFrame 
+Outputs 
+    - pol_pts : (n_region, n_pts) matrix with a value of 1 if point falls in region else 0
+    - pt_which_pol : (n_pts,) vector which contains values 1:n_regions + 1
+      (It consists a value of 0 if a point doesnt fall on a region)
+"""->
+function compute_pts_in_polys_v3(
+    coords::Vector{Tuple{Float64,Float64}}, 
+    df_reg::DataFrame
+)::Tuple{Matrix{Int64}, Vector{Int64}}
+    uniq_regs = df_reg.region |> unique
+    reg_map = Dict(reg => i for (reg,i) in zip(uniq_regs,range(1,length(uniq_regs))))
+    n_pts = length(coords)
+    n_pols = length(uniq_regs)
+    pol_pts = zeros(Int, (n_pols, n_pts))
+    pt_which_pol = zeros(Int, n_pts) # Note a region that isnt included will contain a value 0. 
+    for regn in uniq_regs 
+        df_flt = filter(:region => x -> x == regn, df_reg)
+        geoms = df_flt.geometry # Vector{Geometry}
+        for i_pt = 1:n_pts
+            pt = coords[i_pt]
+            for pol in geoms
+                if LibGEOS.contains(pol,pt)
+                    i_pol = reg_map[regn] # get numeric region code form mapping
+                    pol_pts[i_pol, i_pt] = 1 
+                    pt_which_pol[i_pt] = i_pol
+                end
+            end
+        end
+    end
+    return pol_pts, pt_which_pol
+end
+
 # Aggregate points in region func
 @doc"""
 Used to aggregated values per region 
@@ -167,6 +209,49 @@ function plot_ax_with_points(ax, polys, pts::Matrix, pt_which_pol::Vector{Int64}
         scatter!(ax, pts[:,1], pts[:,2], markersize = 4, color = color)
     end
     return ax
+end
+
+@doc """ 
+Plots a map with Geographic region and points that fall only on a 
+specified region. This is used to ensure that lat/lon points have 
+indeed been 
+Inputs 
+    - df_reg : df_census or df_state to plot geometry boundary
+    - df_pts : df_county or points dataframe with columns
+    poly_hi or poly_lo. These columns can be created using 
+    `df_county[!,:poly_lo] = pt_which_pol_lo` which ensures a region 
+    index is available every point 
+    - reng_idx : Region index (i.e any value between 1:9 for df_census)
+Outputs 
+    - Makie Figure
+"""->
+function plot_pts_in_reg(df_reg::DataFrame, df_pts::DataFrame, regn_idx::Int)::Figure
+    f = Figure(size = (1200,800));
+    us_centroid = GeometryOps.centroid(df_reg.geometry);
+    uniq_regs = unique(df_reg.region)
+    reg_map = Dict(i => reg for (reg,i) in zip(uniq_regs,range(1,length(uniq_regs))))
+    push!(reg_map, 0 => "not inclusive")
+    if nrow(df_reg) == 49
+        df_flt = filter(:poly_hi => x -> x == regn_idx, df_pts)
+        title = "state region : $(reg_map[regn_idx])"
+    else
+        df_flt = filter(:poly_lo => x -> x == regn_idx, df_pts)
+        title = "census region : $(reg_map[regn_idx])"
+    end
+
+    ax = GeoAxis(
+        f[1,1],
+        dest = "+proj=ortho +lon_0=$(us_centroid[1]) +lat_0=$(us_centroid[2])",
+        title = title
+    );
+    poly!(
+        ax, 
+        df_reg.geometry, 
+        color = (:lightgray, 1.0),
+        strokecolor = :black, strokewidth = 2
+    );
+    scatter!(ax, df_flt.centroid_x, df_flt.centroid_y, color = (:blue,1.0), markersize = 7)
+    f 
 end
 
 @doc """

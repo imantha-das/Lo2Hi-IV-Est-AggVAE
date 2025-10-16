@@ -3,9 +3,11 @@ module Utils
 (export 
 dist_euclid, exp_sq_kernel, M_g, compute_pts_polygons, 
 plot_map_with_points, plot_ax_with_points, plot_gp_aggr,
-plot_popn_region
+plot_popn_region, compute_pts_in_polys_v3,
+vae_encoder, vae_decoder, VAE, loss_function
 )
 # Imports
+using DataFrames: DataFrame
 using LinearAlgebra: I
 using ArchGDAL: IGeometry, wkbPolygon
 import LibGEOS
@@ -13,6 +15,14 @@ import GeometryOps
 using CairoMakie 
 using GeoMakie: GeoAxis, poly!
 import ColorSchemes
+
+using Lux
+using Lux:@compact
+using LuxCore
+using ConcreteStructs 
+using Random 
+#using Zygote 
+using MLUtils: rand_like
 set_theme!(theme_light())
 
 # ----------------------- Computational Grid Functions ----------------------- #
@@ -336,6 +346,113 @@ function plot_gps(gps)
         lines!(ax,1:size(gps,1),gps[:,i], color = (:black, 0.2))
     end 
     return fig 
+end
+
+# ------------------------------------ VAE ----------------------------------- #
+@doc """
+Encoder 
+Inputs
+    - rng : Random state 
+    - inp_dim : Input Dimension 
+    - z_dim : Latent Dimension 
+Outputs
+    - z : Latent variable z
+    - μ : Intermediate computation (Need for KL Divergence)
+    - logσ² : Intermediate computation (Needed for KL Divergence)
+"""->
+function vae_encoder(rng, inp_dim::Int, z_dim::Int)
+    return @compact(
+        ;
+        fc1 = Dense(inp_dim, inp_dim ÷ 2), #(3117,*) -> (1558,*)
+        bn1 = BatchNorm(inp_dim ÷ 2),
+        fc2 = Dense(inp_dim ÷ 2, inp_dim ÷ 4), #(1558,*) -> (779, *)
+        bn2 = BatchNorm(inp_dim ÷ 4),
+        fc_mu = Dense(inp_dim ÷ 4, z_dim), #(779, *) -> (389, *)
+        fc_logvar = Dense(inp_dim ÷ 4, z_dim)
+    ) do x 
+    out = elu.(bn1(fc1(x)))
+    out = elu.(bn2(fc2(out)))
+    μ = fc_mu(out)
+    logσ² = fc_logvar(out) # you need to return logσ² as this is whats used in KLDiv
+    T = eltype(logσ²)
+    σ = exp.(logσ² .* T(0.5))
+    ϵ = rand_like(Lux.replicate(rng), σ)
+    z = μ .+ σ .* ϵ
+    return z, μ, logσ²  
+    end
+end
+
+@doc """
+Decoder 
+Inputs 
+    - z_dim : latent dimension 
+    - out_dim : output dimension same as input dimension 
+Outputs 
+    - gp_recon : Reconstructed GP from Normal(0,1)
+"""->
+function vae_decoder(z_dim, out_dim)
+    return @compact(
+        ;
+        fc1 = Dense(z_dim, out_dim ÷ 4), #(389, *) -> (779, *)
+        bn1 = BatchNorm(out_dim ÷ 4),
+        fc2 = Dense(out_dim ÷ 4, out_dim ÷ 2), #(779, *) -> (1558, *)
+        bn2 = BatchNorm(out_dim ÷ 2),
+        fc3 = Dense(out_dim ÷2, out_dim) #(1558, *) -> (3117, *)
+    ) do Z 
+        out = elu.(bn1(fc1(Z))) #(389, *) -> (779, *)
+        out = elu.(bn2(fc2(out))) #(779, *) -> (1558, *)
+        gp_recon = fc3(out) #(1558, *) -> (3117, *)
+        @return gp_recon
+end
+end
+
+@concrete struct VAE <: AbstractLuxContainerLayer{(:encoder, :decoder)}
+    encoder <: AbstractLuxLayer 
+    decoder <: AbstractLuxLayer  
+end
+
+@doc """
+VAE model comprising of encoder and decoder 
+Inputs 
+    - inp_dim : input dimension 
+    - z_dim : latent dimension 
+Output 
+    - VAE : Variational AutoEncoder struct 
+"""-> 
+function VAE(rng, inp_dim, z_dim)
+    encoder = vae_encoder(rng, inp_dim, z_dim)
+    decoder = vae_decoder(z_dim, inp_dim) # second argument is out_dim = inp_dim
+    return VAE(encoder, decoder)
+end
+
+# forward function 
+@doc """
+Forward method 
+Inputs 
+    - x : GP 
+    - ps : VAE params 
+    - st : VAE states
+"""->
+function (vae::VAE)(x, ps,st)
+    (z,μ,logσ²), st_enc = vae.encoder(x, ps.encoder, st.encoder)
+    gp_recon, st_dec = vae.decoder(z, ps.decoder, st.decoder)
+    return (gp_recon, μ, logσ²), (;encoder = st_enc, decoder = st_dec)
+end
+
+@doc """
+Reconstruction Loss & KL Divergence Loss 
+Inputs 
+    - model : VAE 
+    - ps : VAE params (both encoder and decoder)
+    - st : VAE states (both encoder and decoder)
+    - X : Gaussian Process (3117, *)
+"""
+function loss_function(model, ps, st, X)
+    (X_recon, μ, logσ²), st = model(X, ps, st) #(3117,*),(389,*),(389,*)
+    recon_loss = MSELoss(agg = sum)(X_recon, X) #(,) <- float  
+    kldiv_loss = -sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / 2 #(,) <- float
+    loss = recon_loss + kldiv_loss 
+    return loss, st, (;X_recon, μ, logσ², recon_loss, kldiv_loss)
 end
 
 # ----------------------------------- Main ----------------------------------- #

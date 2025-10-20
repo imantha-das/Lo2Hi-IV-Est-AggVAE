@@ -1,271 +1,361 @@
-# ============================= Variational Autoencoder ============================ #
-# Implement AggVAE approach in Lux
+# ---------------------------------------------------------------------------- #
+#                                   avgAggVAE                                   #
+# We will be training VAE to reconstruct **averaged aggregated GP** 
+# The reason why we are avergaging aggregates is to ensure not a lot 
+# latent prevalence values dont stick to 0's and 1's after applying logisitic 
 
-# ------------------------------ Load Packages ------------------------------- #
-using Lux
-using Lux.Experimental: @compact
-using LuxCore
-using MLUtils: randn_like
+# The VAE is used to speec up MCMC as just having GP within a turing model is 
+# extremly slow.
+# ---------------------------------------------------------------------------- #
+import Pkg 
+Pkg.activate("jl_envs/lo2hi-v1.11")
+using GeoDataFrames
+
+using Turing
+using StaticArrays: SVector
+using AbstractGPs: GP, SEKernel, with_lengthscale,ScaleTransform
+
+using Lux 
+using Optimisers: AdamW
+using Mooncake: AutoMooncake
+using Zygote: AutoZygote
+using MLUtils:DataLoader
 using Random
-using ConcreteStructs
-using Optimisers
-using Printf
-using Enzyme
-using Zygote
 
-using JLD2: @save, @load, load
+using Printf: @printf
 using JLD2
+import JSON
+using ArgParse
+using CairoMakie
 
-using .Utils: dist_euclid, exp_sq_kernel, M_g
-using NPZ: npzread
-using AbstractGPs: GP, SEKernel, with_lengthscale, Kernel, SqExponentialKernel, GibbsKernel
+set_theme!(theme_dark())
 
-# ----------------------------------- Data ----------------------------------- #
+include("utils.jl")
+(using .Utils: M_g_mean, vae_encoder, vae_decoder, VAE, loss_function)
+
+# ----------------------------- Argparse Setting ----------------------------- #
+s = ArgParseSettings()
+@add_arg_table s begin 
+    "--fly"
+    help = "generate GP's on fly"
+    action = :store_true
+    "--epochs"
+    help = "Number of epochs"
+    arg_type = Int 
+    default = 30
+    "--n_samples" 
+    help = "number of gp samples to generate"
+    arg_type = Int 
+    default = 5120
+    "--b_size"
+    help = "Batch Size"
+    arg_type = Int
+    default = 256
+    "--valid_size"
+    help = "Percentage of validation data in comparison to train,i.e 1, train_size = valid_size"
+    arg_type = Float64
+    default = 1.0
+end 
+
+args = parse_args(s)
+
+# -------------------------- Datasets & DataLoaders -------------------------- #
+
+@doc """ 
+Creates GP samples 
+Inputs 
+    - df: county level dataframe containing lat/lon 
+    - M: Matrix containing 1's or 0's for points in region
+    - n_samples : number of gp samples 
+    - jitter : jitter to be added to GP 
+Outputs
+    - f_x : GP's (3117, n_samples)
+"""
+function get_aggmean_gp(
+    df::DataFrame,
+    M::Matrix{Int64};
+    n_samples::Int =100,
+    jitter::Float64 = 1e-4
+    )::Matrix{Float32}
+
+    kernel_length = InverseGamma(3,3)
+    kernel_variance = truncated(Normal(0,0.05), lower = 0)
+    x = df[!, [:centroid_x,:centroid_y]] |> Matrix #(3117,2)
+    k = with_lengthscale(rand(kernel_variance) * SEKernel(), rand(kernel_length))
+    f = GP(k)
+    x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)]
+    f_latent = f(x_svec, jitter)
+    f_x = rand(f_latent, n_samples) .|> Float32 
+    fμ_agg = M_g_mean(M,f_x)
+    return fμ_agg
+end
+
+@doc """
+Training Loop for fixed Dataset 
+Inputs 
+    - rng : Random Generator (i.e Xoshiro())
+    - model : VAE model 
+    - opt : Optimizer 
+    - trainloader : train dataloader 
+    - validloader : valid dataloader 
+    - epochs : number of epochs to train 
+"""->
+function train_fxd(rng, model, opt, trainloader, validloader;epochs = 25)
+    Random.seed!(rng)
+    ps, st = Lux.setup(rng, model)
+    train_state = Training.TrainState(model, ps, st, opt)
+    losses = Dict(:train => [], :valid => [])
+    for epoch in 1:epochs
+        running_train_loss = 0.0f0
+        running_valid_loss = 0.0f0
+        running_train_samples = 0
+        running_valid_samples = 0 
+        for (i, (X,)) in enumerate(trainloader)
+            (_, loss, _, train_state) = Training.single_train_step!(
+                AutoZygote(),
+                loss_function,
+                X,
+                train_state;
+                return_gradients = Val(false)
+            )
+            running_train_loss += loss
+            running_train_samples += size(X,2) 
+        end
+        for (i,(X,)) in enumerate(validloader)
+            loss, _ = loss_function(
+                train_state.model, 
+                train_state.parameters,
+                train_state.states,
+                X
+            )
+            running_valid_loss += loss 
+            running_valid_samples += size(X,2)
+        end
+        @printf "Epoch : %d Train Loss : %.3f Valid Loss : %.3f \n" epoch running_train_loss/running_train_samples running_valid_loss/running_valid_samples
+        push!(losses[:train], running_train_loss/running_train_samples)
+        push!(losses[:valid], running_valid_loss/running_valid_samples)
+    end
+    return train_state, losses
+end
+
+@doc """
+Trains models with GP's generated on fly. Every epoch the model will see 
+a new set of GP's. Technically you shouldnt need a validation set. 
+Inputs 
+    - rng : Random Generator 
+    - model : VAE model 
+    - opt : optimizer 
+    - df_grid : dataframe containing lat/lon points at county level 
+    - get_cat_gps : A function from `training_loop` function that concatenates lo and hi gps 
+    - n_samples : number of samples 
+    - epochs : number of epochs 
+    - valid_size : validation size in comparison to train size (0-1)
+    - jitter : jitter 
+"""
+function train_fly(
+    rng, 
+    model, 
+    opt, 
+    df_grid::DataFrame,
+    M_lo::Matrix{Int64},
+    M_hi::Matrix{Int64},
+    get_cat_gps::Function #This functions is defined in training_loop and returns concatenated hi and lo gp's
+    ; 
+    n_samples::Int = args.n_samples, 
+    epochs::Int = args.epochs, 
+    valid_size::Float64 = args.valid_size,
+    jitter::Float64 = 1e-4
+    )
+    Random.seed!(rng)
+    ps,st = Lux.setup(rng, model)
+    train_state = Training.TrainState(model, ps, st, opt)
+    losses = Dict(:train => [], :valid => [])
+    for epoch in 1:epochs 
+        X_train = get_cat_gps(df_grid, M_lo, M_hi, n_samples = n_samples, valid_size = nothing,  jitter = jitter)
+        X_valid = get_cat_gps(df_grid, M_lo, M_hi, n_samples = n_samples, valid_size = valid_size, jitter = jitter)
+        (_,train_loss,_,train_state) = Training.single_train_step!(
+            AutoZygote(),
+            loss_function, 
+            X_train, 
+            train_state;
+            return_gradients = Val(false)
+        )
+        valid_loss, _ = loss_function(
+            train_state.model,
+            train_state.parameters,
+            train_state.states, 
+            X_valid
+        )
+        push!(losses[:train], train_loss/n_samples)
+        push!(losses[:valid], valid_loss/Int(valid_size * n_samples))
+        @printf "Epoch : %d Train Loss : %.3f Valid Loss : %.3f \n" epoch train_loss/n_samples valid_loss/Int(valid_size * n_samples)
+    end
+    return train_state, losses
+end
+
+@doc """
+    Train VAE for n number of epochs. 
+    Inputs 
+        - Model : VAE model 
+        - opt : Optimizer 
+        - df_grid : Dataframe containing lat/lon points at county level 
+        - M_lo/M_hi : Martrix containing 1's for points that fall on regions else 0 
+        - get_gp : Function that produces GP (Function to be places as it is without arguments)
+        - epochs : Number of epochs 
+        - n_samples : Number of samples 
+        - batchsize : Number of batches (only for fixed dataloader)
+        - valid_size : validation data size in relation to training (float value between 0-1)
+        - fly : Boolean, if true trains model generating GP's on fly, else  fixed set of GP's using a dataloader
+"""->
+function training_loop(
+    model,
+    opt,
+    df_grid::DataFrame, 
+    M_lo::Matrix{Int64},
+    M_hi::Matrix{Int64},
+    get_gp::Function
+    ;
+    epochs::Int = 25,
+    n_samples::Int = 100,
+    batchsize::Union{Int, Nothing} = nothing,
+    valid_size::Float64 = 1.0,
+    fly::Bool = true,
+    jitter::Float64 = 1e-4,
+)
+    function get_cat_gps(df_grid,M_lo,M_hi; n_samples, valid_size, jitter)
+        if valid_size isa Nothing
+            gp_aggmean_lo = get_gp(df_grid,M_lo;n_samples = n_samples, jitter = jitter) #(9,*)
+            gp_aggmean_hi = get_gp(df_grid,M_hi;n_samples = n_samples, jitter = jitter) #(49,*)
+        else 
+            gp_aggmean_lo = get_gp(df_grid,M_lo;n_samples = Int(n_samples * valid_size), jitter = jitter) #(9,*)
+            gp_aggmean_hi = get_gp(df_grid,M_hi;n_samples = Int(n_samples * valid_size), jitter = jitter) #(49,*)
+        end
+        return vcat(gp_aggmean_lo, gp_aggmean_hi) #(58,*)
+    end
+
+    if fly 
+        println("Training model by generating GP's on fly")
+        train_state, losses = train_fly(
+            Xoshiro(), 
+            model, 
+            opt, 
+            df_grid, 
+            M_lo, 
+            M_hi, 
+            get_cat_gps; 
+            n_samples = n_samples, 
+            epochs = epochs, 
+            valid_size = valid_size, 
+            jitter = jitter
+        )
+    else 
+        println("Training model using fixed datloader")
+        gp_aggmean_train = get_cat_gps(df_grid, M_lo, M_hi,n_samples = n_samples, valid_size = nothing, jitter = jitter) #(58,*)
+        gp_aggmean_valid = get_cat_gps(df_grid, M_lo, M_hi,n_samples = n_samples, valid_size = valid_size, jitter = jitter) #(58,*')
+        trainloader = DataLoader((gp_aggmean_train,), batchsize = batchsize)
+        validloader = DataLoader((gp_aggmean_valid,), batchsize = batchsize)
+        train_state, losses = train_fxd(
+            Random.Xoshiro(),
+            model,
+            opt,
+            trainloader,
+            validloader,
+            epochs = epochs
+        )
+    end
+    return train_state, losses
+end
+
+# ---------------------------------------------------------------------------- #
+#                                     Main                                     #
+# ---------------------------------------------------------------------------- # 
+
+# --------------------------------- Load Data -------------------------------- #
 begin 
-    data_root = "data/processed"
-    # lat/lon values of artficial grid
-    x = npzread(joinpath(data_root, "lat_lon_x.npy")) #(2618,2)
-    # Coarse/Low resolution administrative region
-    # Points that fall on the region takes a value 1 else 0
-    pol_pt_lo = npzread(joinpath(data_root, "low", "pol_pt_lo.npy")) #(9,2618)
-    # Points that fall on the region takes values 0::num_regions
-    pt_which_pol_lo = npzread(joinpath(data_root, "low", "pt_which_pol_lo.npy")) #(2618,)
-    # High resolution administrative num_regions
-    pol_pt_hi = npzread(joinpath(data_root, "high", "pol_pt_hi.npy"))
-    pt_which_pol_hi = npzread(joinpath(data_root, "high", "pt_which_pol_hi.npy"))
-    # Geopandas dataframes
-    df_lo = GeoIO.load(joinpath(data_root, "low", "us_census_divisions", "us_census_divisions.shp"))
-    df_hi = GeoIO.load(joinpath(data_root, "high", "us_state_divisions", "us_state_divisions.shp"))
-    # Number of tested cases - This is "n" in Binomial(n,p)
-    # You need to add Vector{Int64} or use skipmissing to get rid of type Vector{Union{Missing, Int64}}
-    n_tested_lo = Vector{Int64}(df_lo[:, "tot_specs"]);
-    n_tested_hi = Vector{Int64}(df_hi[:, "tot_specs"]);
-    # Get number tested positive - This is "y" ~ Binomial(n,p)
-    n_positive_lo =Vector{Int64}(df_lo[:, "tot_cases"]);
-    # Note "p" is prevelence which we model as linear function with Random effects GP
-    n_positive_hi = Vector{Int64}(df_hi[:, "tot_cases"]);
+    # Load Census : Low Resolution data
+    census_fold = "data/processed/v3/census"
+    census_files = filter(x -> endswith(x,".shp"), readdir(census_fold)) 
+    census_path = joinpath(census_fold, first(census_files))
+    df_census = GeoDataFrames.read(census_path)
+
+    # Load States : High resolution data 
+    state_fold = "data/processed/v3/states"
+    state_files = filter(x -> endswith(x, ".shp"), readdir(state_fold))
+    state_path = joinpath(state_fold, state_files[1])
+    df_state = GeoDataFrames.read(state_path)
+
+    # Load Grid : Also contains population at county level
+    county_fold = "data/processed/v3/county_grid_v3jl"
+    county_files = filter(x -> endswith(x, ".shp"), readdir(county_fold))
+    county_path = joinpath(county_fold, first(county_files))
+    df_county = GeoDataFrames.read(county_path)
+
+    pol_pts = JLD2.load("data/processed/v3/pol_pts.jld2")
+    pol_pts_lo = pol_pts["pol_pts_lo"]
+    pol_pts_hi = pol_pts["pol_pts_hi"]
+
+    pt_which_pol = JLD2.load("data/processed/v3/pt_which_pol.jld2")
+    pt_which_pol_lo = pt_which_pol["pt_which_pol_lo"]
+    pt_which_pol_hi = pt_which_pol["pt_which_pol_hi"]
 end
 
-# GP Kernel
-k = SEKernel()
-f = GP(k)
-x_svec = [SVector{2,}(x[i,:]) for i in 1:size(x,1)]
-f_latent = f(x_svec, 1e-4)
-# You can extract a realization of the GP using rand
-rand(f_latent)
+# ----------------------- Create Datasets & DataLoaders ---------------------- #
 
-lo_regions = skipmissing(df_lo.area) |> collect
-hi_regions = skipmissing(df_hi.area) |> collect
+in_dim = 58 ; h_dim = 50 ; z_dim = 40
+model = VAE(Xoshiro(), in_dim, h_dim, z_dim)
+opt = AdamW(;eta = 1.0e-3, lambda = 1.0e-5)
 
-gp_aggr_lo = M_g(pol_pt_lo, rand(f_latent,100))
-gp_aggr_hi = M_g(pol_pt_hi, rand(f_latent,100))
-gp_aggr = vcat(gp_aggr_lo, gp_aggr_hi) #(58,100)
+epochs = args["epochs"]
+n_samples = args["n_samples"]
+batch_size = args["b_size"]
+valid_size = args["valid_size"]
 
-# ---------------------------------- Encoder --------------------------------- #
-function vae_encoder(rng, inp_dims::Int,h_dims::Int, z_dims::Int)
-    return @compact(;
-        fc1 = Dense(inp_dims,h_dims), #(inp_dims, *) -> (h_dims, *)
-        bn1 = BatchNorm(h_dims), #(h_dims, *) -> (h_dims, *)
-        fc_mu = Dense(h_dims, z_dims), #(h_dims, *) -> (z_dims, *)
-        fc_logvar = Dense(h_dims, z_dims), #(h_dims, *) -> (z_dims, *)
-        rng
-    ) do x 
-        h = elu.(bn1(fc1(x))) #(h_dims, *)
-        μ = fc_mu(h) #(z_dims, *)
-        logσ² = fc_logvar(h) #(z_dims, *) 
-        # Clamp log variance for numerical stability 
-        T = eltype(logσ²)
-        logσ² = clamp.(logσ², -T(20.0f0), T(10.0f0)) #(z_dims, *)
-        σ = exp.(logσ² .* T(0.5)) #(z_dims, *)
-        # Generate a tensor of random values from a normal distribution 
-        ϵ = randn_like(Lux.replicate(rng), σ)
-        # Reparameterization trick
-        z = μ .+ σ .* ϵ
-        @return z, μ, logσ² 
-    end
-end
-
-# ---------------------------------- Decoder --------------------------------- #
-function vae_decoder(z_dim, h_dims, out_dims)
-    return @compact(;
-        fc1 = Dense(z_dim, h_dims), #(z_dim, *) -> (h_dims, *)
-        bn1 = BatchNorm(h_dims), #(h_dims, *) -> (h_dims, *)
-        fc2 = Dense(h_dims, out_dims), #(h_dims, *) -> (out_dims, *)
-    ) do Z 
-        h = elu.(bn1(fc1(Z))) #(h_dims, *)
-        gp_recon = fc2(h)
-        @return gp_recon
-    end
-end
-
-# test encoder and decoder
-vae_enc = vae_encoder(Random.default_rng(), size(gp_aggr,1), 50, 40)
-ps, st = Lux.setup(Random.default_rng(),vae_enc)
-(z,μ, logσ²), newstate =  vae_enc(Float32.(gp_aggr), ps, st) 
-
-vae_dec = vae_decoder(40, 50, 58)
-ps, st = Lux.setup(Random.default_rng(),vae_dec)
-gp_recon, newstate = vae_dec(z, ps, st)
-
-# ------------------------------------ VAE ----------------------------------- #
-@concrete struct VAE <: AbstractLuxContainerLayer{(:encoder, :decoder)}
-    encoder <: AbstractLuxLayer
-    decoder <: AbstractLuxLayer 
-end 
-
-function VAE(rng, h_dims, z_dims, inp_dims, out_dims)
-    decoder = vae_decoder(z_dims, h_dims, out_dims) 
-    encoder = vae_encoder(rng, inp_dims, h_dims, z_dims)
-    return VAE(encoder, decoder) 
-end 
-
-# Forward function
-function (vae::VAE)(x, ps, st)
-    (z, μ, logσ²), st_enc = vae.encoder(x, ps.encoder, st.encoder)
-    x_rec, st_dec = vae.decoder(z, ps.decoder, st.decoder)
-    return (x_rec, μ, logσ²), (;encoder = st_enc, decoder = st_dec)
-end
-
-function encode(vae::VAE, x, ps, st)
-    (z, _,_), st_enc = vae.encoder(x, ps.encoder, st.encoder)
-    return z, (;encoder = st_enc, st.decoder) #you need to return decoder to update sttes
-end
-
-function decode(vae::VAE, z, ps, st)
-    gp_rec, st_dec = vae.decoder(z, ps.decoder, st.decoder)
-    return gp_rec, (;decoder = st_dec, st.encoder) #you need to return encoder to update its state
-end
-
-# test vae model
-vae = VAE(Random.default_rng(), 50, 40, size(gp_aggr,1), size(gp_aggr,1))
-ps, st = Lux.setup(Random.default_rng(), vae)
-(x_rec, μ, logσ²), st = vae(Float32.(gp_aggr), ps, st)
-z, (st_enc, st_dec) = encode(vae, Float32.(gp_aggr), ps, st)
-gp_rec, (st_dec, st_enc) = decode(vae, z, ps, st)
-
-# ------------------------------- Loss function ------------------------------ #
-function loss_function(model, ps, st, X)
-    (X_recon, μ, logσ²), st = model(X, ps, st)
-    reconstruction_loss = MSELoss(agg = sum)(X_recon, X)
-    kldiv_loss = -sum(1 .+ logσ² .- μ.^2 .- exp.(logσ²)) / 2
-    loss = reconstruction_loss + kldiv_loss 
-    return loss, st, (;X_recon, μ, logσ², reconstruction_loss, kldiv_loss)
-end
-
-#test loss function
-X = Float32.(gp_aggr) #(58,*)
-vae = VAE(Random.default_rng(), 50, 40, 58, 58)
-ps, st = Lux.setup(Random.default_rng(), vae)
-loss_function(vae, ps, st, X)
-
-# --------------------------- Create Fixed Dataset --------------------------- #
-
-# Fixed Data Loader 
-function make_fixed_dataset(f_latent, M_lo, M_hi;num_batches, batch_size)
-    gp_aggr_lo = M_g(M_lo, rand(f_latent, batch_size * num_batches))
-    gp_aggr_hi = M_g(M_hi, rand(f_latent, batch_size * num_batches))
-    return vcat(gp_aggr_lo, gp_aggr_hi) # (58, num_samples * num_batches)
-end 
-
-batch_size = 128
-num_batches = 1000
-valid_size = 0.3
-train_idxs = 1:floor(Int, (1-valid_size) * num_batches * batch_size)
-valid_idxs = (floor(Int, (1-valid_size) * num_batches * batch_size) + 1):num_batches * batch_size
-
-
-# Create a dataset
-gp_aggr_fixed = make_fixed_dataset(
-    f_latent,
-    pol_pt_lo,
-    pol_pt_hi;
-    batch_size = batch_size,
-    num_batches = num_batches
-); #(58, 160)
-
-gp_aggr_fixed_val = make_fixed_dataset(
-    f_latent,
-    pol_pt_lo,
-    pol_pt_hi;
-    batch_size = batch_size,
-    num_batches = 10
+train_state, losses = training_loop(
+    model,
+    opt,
+    df_county, 
+    pol_pts_lo,
+    pol_pts_hi,
+    get_aggmean_gp;
+    epochs = epochs,
+    n_samples = n_samples,
+    batchsize = batch_size,
+    valid_size = valid_size,
+    fly = args["fly"],
+    jitter = 1e-4, 
 )
 
-struct FixedDataLoader
-    data::Array #(58,6400)
-    batch_size::Int # 64
+# --------------------------- Save Model Parameters -------------------------- #
+trained_ps = train_state.parameters 
+trained_st = train_state.states 
+flyorfxd = args["fly"] ? "fly" : "fxd"
+save_dir = "model_runs/jl/aggGpVae_ep$(epochs)_smp$(n_samples)_$(flyorfxd)"
+if !isdir(save_dir)
+    mkpath(save_dir)
+end
+
+# Save Model Parameters 
+model_params = Dict(
+    "input_dim" => in_dim,
+    "hidden_dim" => h_dim,
+    "z_dim" => z_dim,
+    "train_method" => flyorfxd,
+    "epoch" => epochs,
+    "n_samples" => n_samples,
+    "batch_size" => args["fly"] ? nothing : batch_size
+)
+
+# Write model parameters to JSON file 
+open(joinpath(save_dir, "model_params.json"), "w") do f
+    JSON.print(f, model_params)
 end 
 
-Base.iterate(loader::FixedDataLoader, state = 1) = 
-    # when state > 6400 ? nothing <- do not iterate further
-    # if the state = 1 we will get [:,1:64] and state = 65 (second entry of tuple)
-    # so next state = 65, we will get [:, 65:128] and state = 129 
-    state > size(loader.data, 2) ? nothing : 
-    (loader.data[:, state:state+loader.batch_size-1], state + loader.batch_size)
+# Save VAE state and params 
+@save joinpath(save_dir, "params_states") {compress = true} trained_ps trained_st 
 
-trainloader = FixedDataLoader(gp_aggr_fixed[:,train_idxs] .|> Float32, batch_size)
-validloader = FixedDataLoader(gp_aggr_fixed[:,valid_idxs] .|> Float32, batch_size)
-for batch in trainloader
-    @show size(batch)
-    @show typeof(batch)
-    break
-end
-
-# -------------------------- On the fly Data Loader -------------------------- #
-#todo : To be implemented 
-
-# ------------------------------ Training Loop ------------------------------- #
-seed = 0
-h_dims = 50
-z_dims = 40
-imp_dims = out_dims = size(gp_aggr,1)
-learning_rate = 1.0e-3
-weight_decay = 1.0e-5
-epochs = 25
-
-rng = Xoshiro() 
-Random.seed!(rng, seed)
-vae = VAE(rng, h_dims, z_dims, imp_dims, out_dims)
-ps, st = Lux.setup(rng, vae)
-
-opt = AdamW(; eta = learning_rate, lambda = weight_decay)
-train_state = Training.TrainState(vae, ps, st, opt)
-@printf "Total Trainable Parameters: %0.4f M\n" (Lux.parameterlength(ps) / 1.0e-6)
-
-for epoch in 1:epochs
-    total_loss= 0.0f0 
-    total_valid_loss = 0.0f0
-    total_samples = 0 
-    total_valid_samples = 0
-
-    start = time()
-    for (i,X) in enumerate(trainloader)
-        (_, loss, _, train_state) = Training.single_train_step!(
-            AutoZygote(), loss_function, X, train_state; return_gradients = Val(false)
-        )
-        total_loss += loss 
-        total_samples += size(X, ndims(X))
-        throughput = total_samples / (time() - start)
-        #@printf "Epoch %d, Iter %d, Loss: %.7f, Throughput: %.6f im/s\n" epoch i loss throughput
-    end
-
-    for (i,X) in enumerate(validloader)
-        loss, _ = loss_function(train_state.model, train_state.parameters, train_state.states, X)
-        total_valid_loss += loss
-        total_valid_samples += size(X, ndims(X))
-
-    end
-    
-    @printf "Epoch: %d Loss: %.3f Valid Loss: %.3f \n" epoch total_loss / total_samples total_valid_loss / total_valid_samples
-
-end
-
-# ------------------------------ Save the model ------------------------------ #
-if !isdir("checkpoints_jl")
-    mkpath("checkpoints_jl")
-end
-
-trained_params = train_state.parameters
-trained_states = train_state.states
-@save "checkpoints/vae_params_states.jld2" {compress = true} trained_params trained_states
-
+# ---------------------------------- Losses ---------------------------------- #
+fig = Figure(); ax = Axis(fig[1,1], title = "losses")
+lines!(1:length(losses[:train]), losses[:train], label = "train")
+lines!(1:length(losses[:valid]), losses[:valid], label = "valid")
+fig[1,2] = Legend(fig, ax, "losses")
+CairoMakie.save(joinpath(save_dir, "losses.png"), fig)

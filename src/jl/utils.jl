@@ -1,7 +1,7 @@
 module Utils 
 
 (export 
-dist_euclid, exp_sq_kernel, M_g, compute_pts_polygons, 
+dist_euclid, exp_sq_kernel, M_g, M_g, compute_pts_polygons, 
 plot_map_with_points, plot_ax_with_points, plot_gp_aggr,
 plot_popn_region, compute_pts_in_polys_v3,
 vae_encoder, vae_decoder, VAE, loss_function
@@ -17,7 +17,6 @@ using GeoMakie: GeoAxis, poly!
 import ColorSchemes
 
 using Lux
-using Lux:@compact
 using LuxCore
 using ConcreteStructs 
 using Random 
@@ -159,6 +158,29 @@ Inputs
     - matmul(M,g) gives a vector sum over each polygon
 """->
 M_g(M,g) = M * g #(n_regions,) e.g (9,)
+
+@doc""" 
+Computes the aggraged value mean per region. 
+The reason why we do this is when computing just aggregates, the number of
+points can scale largely if many points fall on the region. 
+When applying logistic at latente prevalence estimation this forms a lot of
+extreme values (0,1's) instead of values in between.
+Inputs 
+    - M : Matrix with binary entries $m_{ij}, $ showing whether point $j$ is in polygon $i$
+        - shape : (n_regions, n_grd_pts) ; e.g : (9, 2618)
+        - This is the variable pol_pt_lo or pol_pt_hi
+    - g : Is a vector of GP draws over the grid
+        - shape : (n_grd_pts,) ; e.g (2618,)
+        - This is the gp function
+    - matmul(M,g) gives a vector sum over each polygon
+"""->
+function M_g_mean(M,g)
+    counts = sum(M; dims = 2) # 9x1 Mat 
+    #counts[counts .== 0] .= 1 
+    summed = M * g #(9,*)
+    mean_vals = summed ./ counts
+    return mean_vals
+end 
 
 # -------------------------- Visialization Functions ------------------------- #
 @doc """
@@ -350,7 +372,7 @@ end
 
 # ------------------------------------ VAE ----------------------------------- #
 @doc """
-Encoder 
+Encoder for GP
 Inputs
     - rng : Random state 
     - inp_dim : Input Dimension 
@@ -382,8 +404,40 @@ function vae_encoder(rng, inp_dim::Int, z_dim::Int)
     end
 end
 
+@doc """ 
+VAE Encoder for AggGP
+Inputs 
+    - rng : Random state 
+    - inp_dim : Input Dimension 
+    - h_dim : Hidden Dimension
+    - z_dim : Latent Dimension 
+Outputs 
+    - z : Latent variable z 
+    - μ : Intermediate computation (Need for KL Divergence)
+    - logσ² : Intermediate computation (Needed for KL Divergence)
+"""->
+function vae_encoder(rng, inp_dim::Int, h_dim::Int, z_dim::Int)
+    return @compact(
+        ;
+        fc1 = Dense(inp_dim, h_dim), #(58,*) -> (50,*)
+        bn1 = BatchNorm(h_dim),
+        fc_mu = Dense(h_dim, z_dim), #(50, *) -> (40, *)
+        fc_logvar = Dense(h_dim, z_dim) #(50, *) -> (40, *)
+    ) do x 
+    out = elu.(bn1(fc1(x)))
+    μ = fc_mu(out)
+    logσ² = fc_logvar(out) # We need this quantity for KLDiv
+    T = eltype(logσ²)
+    σ = exp.(logσ² .* T(0.5))
+    ϵ = rand_like(Lux.replicate(rng), σ)
+    z = μ .+ σ .* ϵ 
+    return z, μ, logσ²
+end
+end
+
+
 @doc """
-Decoder 
+Decoder for GP
 Inputs 
     - z_dim : latent dimension 
     - out_dim : output dimension same as input dimension 
@@ -398,12 +452,34 @@ function vae_decoder(z_dim, out_dim)
         fc2 = Dense(out_dim ÷ 4, out_dim ÷ 2), #(779, *) -> (1558, *)
         bn2 = BatchNorm(out_dim ÷ 2),
         fc3 = Dense(out_dim ÷2, out_dim) #(1558, *) -> (3117, *)
-    ) do Z 
-        out = elu.(bn1(fc1(Z))) #(389, *) -> (779, *)
+    ) do z 
+        out = elu.(bn1(fc1(z))) #(389, *) -> (779, *)
         out = elu.(bn2(fc2(out))) #(779, *) -> (1558, *)
         gp_recon = fc3(out) #(1558, *) -> (3117, *)
         @return gp_recon
 end
+end
+
+@doc"""
+VAE Decoder for AggGP
+Inputs 
+    - z_dim : latent dimension from which gp is reconstructed 
+    - h_dim : hidden dimension 
+    - out_dim : Output dimension which is the same as encoders input dimension
+Outputs 
+    - gp_recon : Reconstructed GP 
+"""->
+function vae_decoder(z_dim, h_dim, out_dim)
+    return @compact(
+        ;
+        fc1 = Dense(z_dim, h_dim),
+        bn1 = BatchNorm(h_dim),
+        fc2 = Dense(h_dim, out_dim)
+    ) do z 
+    out = elu.(bn1(fc1(z)))
+    gp_recon = fc2(out)
+    return gp_recon
+end 
 end
 
 @concrete struct VAE <: AbstractLuxContainerLayer{(:encoder, :decoder)}
@@ -412,7 +488,7 @@ end
 end
 
 @doc """
-VAE model comprising of encoder and decoder 
+VAE model comprising of encoder and decoder (For GP)
 Inputs 
     - inp_dim : input dimension 
     - z_dim : latent dimension 
@@ -422,6 +498,20 @@ Output
 function VAE(rng, inp_dim, z_dim)
     encoder = vae_encoder(rng, inp_dim, z_dim)
     decoder = vae_decoder(z_dim, inp_dim) # second argument is out_dim = inp_dim
+    return VAE(encoder, decoder)
+end
+
+@doc """
+VAE model comprising of the encoder and decoder (For Agg GP)
+Inputs 
+    - inp_dim : input dimension 
+    - z_dim : latent dimension 
+Output 
+    - VAE : Variational Autoencoder struct 
+"""->
+function VAE(rng, inp_dim, h_dim, z_dim)
+    encoder = vae_encoder(rng, inp_dim, h_dim, z_dim)
+    decoder = vae_decoder(z_dim, h_dim, inp_dim) #inp_dim same as out_dim
     return VAE(encoder, decoder)
 end
 

@@ -16,6 +16,7 @@ import flax.linen as nn
 import torch 
 from torch.utils.data import TensorDataset, DataLoader, random_split
 
+import pandas as pd
 import numpy as np
 import geopandas as gpd
 
@@ -333,6 +334,21 @@ if __name__ == "__main__":
         noise = 1e-4
     )["gp_aggr"]
 
+    p = figure(title = "gp prior")
+    prior_samps = gp_aggr_samples.shape[0] if gp_aggr_samples.shape[0] <= 1000 else 1000
+    for i in range(prior_samps):
+        p.line(
+            jnp.arange(0,gp_aggr_samples.shape[1]), 
+            gp_aggr_samples[i,:],
+            color = "black",
+            alpha = 0.5
+        )
+    export_png(p, filename=os.path.join(save_path, "gp_prior.png"))
+    with open(os.path.join(save_path,"gp_prior.npy"),"wb") as f:
+        np.save(f, np.array(gp_aggr_samples))
+
+
+
     # ------------------------------------ SVI ----------------------------------- #
     # optimizer 
     adam = numpyro.optim.Adam(step_size = 0.001)
@@ -416,6 +432,8 @@ if __name__ == "__main__":
     with open(os.path.join(save_path, "dec_wts"),"wb") as file:
         pickle.dump(dec_params, file)
 
+    pd.DataFrame(losses).to_csv(os.path.join(save_path, "losses.csv"), index = False)
+    
     # Losses
     p = figure(title = "losses",background_fill_color = "#fafafa")
     p.xaxis.axis_label = "epochs"

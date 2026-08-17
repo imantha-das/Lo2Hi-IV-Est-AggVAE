@@ -37,6 +37,7 @@ def gp_aggr(
     M_lo:Float[Array, "n_reg n_pts"],
     M_hi:Float[Array, "n_reg n_pts"],
     popw,
+    glb:bool,
     noise:float = 1e-4,
     jitter:float = 1e-4,
 ):
@@ -57,11 +58,11 @@ def gp_aggr(
     # Aggregated Gps for all points in regions (low/high)
     gp_aggr_lo = numpyro.deterministic(
         "gp_aggr_lo",
-        M_g(M_lo,f,popw)
+        M_g(M_lo,f,popw,glb)
     ) # (n_regions_lo,)
     gp_aggr_hi = numpyro.deterministic(
         "gp_aggr_hi",
-        M_g(M_hi,f,popw),
+        M_g(M_hi,f,popw,glb),
     ) # (n_regions_hi,)
     gp_aggr = numpyro.deterministic(
         "gp_aggr",
@@ -204,7 +205,7 @@ def epoch_eval_fixed_gps(svi_state, valloader):
 @jit
 def epoch_train_gen_gp_on_fly(
     svi_state, rng_key, num_samples, num_batches, 
-    x, M_lo, M_hi, popw
+    x, M_lo, M_hi, popw, glb
 ):
     """Generate gp realizations at train time, every epoch see a new set
     of gps""" 
@@ -220,6 +221,7 @@ def epoch_train_gen_gp_on_fly(
             M_lo = M_lo, 
             M_hi = M_hi,
             popw = popw, 
+            glb = glb,
             noise = 1e-4,
             jitter = 1e-4
         )["gp_aggr"] #(*,56)
@@ -239,7 +241,7 @@ def epoch_train_gen_gp_on_fly(
     return loss / num_batches, svi_state
 
 @jit
-def epoch_eval_gen_gp_on_fly(svi_state, rng_key, num_samples, num_batches, x, M_lo, M_hi,popw):
+def epoch_eval_gen_gp_on_fly(svi_state, rng_key, num_samples, num_batches, x, M_lo, M_hi,popw, glb):
     """Evaluate model on GP's generated on fly, same gp is not seen by the model in the following epochs"""
     def body_fn(i, loss_sum):
         # use random.fold_in to generate keys 
@@ -252,6 +254,7 @@ def epoch_eval_gen_gp_on_fly(svi_state, rng_key, num_samples, num_batches, x, M_
             M_lo = M_lo, 
             M_hi = M_hi, 
             popw = popw, 
+            glb = glb,
             jitter = 1e-4,
             noise = 1e-4
         )["gp_aggr"]
@@ -279,6 +282,7 @@ if __name__ == "__main__":
     parser.add_argument("--beta", type = float, default = None, help = "To train a beta vae")
     parser.add_argument("--gen_gp_on_fly", action = "store_true", help = "at every epoch sample a new batch of gp's during training")
     parser.add_argument("--popw",action = "store_true", help = "normalise gp by population")
+    parser.add_argument("--rgnw",action = "store_true", help = "normalise by population per region instead of national")
     args = parser.parse_args()
 
     # ----------------------------- Save Destination ----------------------------- #
@@ -286,6 +290,7 @@ if __name__ == "__main__":
     fxd_or_fly = "fly" if args.gen_gp_on_fly else "fxd"
     n_total = args.n_samples * args.n_batches
     popn = "popw" if args.popw else "nopopw"
+    glb = False if args.rgnw else True
 
     if args.beta:
         save_path = os.path.join(
@@ -314,7 +319,7 @@ if __name__ == "__main__":
     # Lat/Lon points at county level
     x = jnp.array(coords) #(n_pts,2)
     n_pts,_ = x.shape
-    pop = gdf_county.pop2020.values if args.popw else None
+    pop = jnp.array(gdf_county.pop2020.values) if args.popw else None
 
     samples_key, svi_key, split_key = random.split(PRNGKey(0), 3)
 
@@ -330,6 +335,7 @@ if __name__ == "__main__":
         M_lo = pol_pts_lo, 
         M_hi = pol_pts_hi, 
         popw = pop, 
+        glb = glb,
         jitter = 1e-4, 
         noise = 1e-4
     )["gp_aggr"]
@@ -388,7 +394,8 @@ if __name__ == "__main__":
                 x = x, 
                 M_lo = pol_pts_lo,
                 M_hi = pol_pts_hi,
-                popw = pop
+                popw = pop,
+                glb = glb
             )
             valid_loss = epoch_eval_gen_gp_on_fly(
                 svi_state, 
@@ -432,6 +439,16 @@ if __name__ == "__main__":
     with open(os.path.join(save_path, "dec_wts"),"wb") as file:
         pickle.dump(dec_params, file)
 
+    met = {
+        "n_samples" : [args.n_samples],
+        "n_batches" : [args.n_batches],
+        "popw" : [True] if args.popw else [None],
+        "glb" : [False] if args.rgnw else [True],
+        "epochs" : [args.epochs], 
+        "beta" : [args.beta],
+        "fxd_or_fly" : ["fly"] if args.gen_gp_on_fly else ["fxd"] 
+    }
+    pd.DataFrame(met).to_csv(os.path.join(save_path, "met.csv"))
     pd.DataFrame(losses).to_csv(os.path.join(save_path, "losses.csv"), index = False)
     
     # Losses

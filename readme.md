@@ -33,4 +33,4 @@
 ![County Grids](plots/county_grids.png)
 
 ## Prior Predictive Distribution over Regions
-![Prior Preds](plots/prev_prior_pred_dist.png)
+![Prior Preds](plots/gp_vs_vae_recon_spf.png)

@@ -1,0 +1,15 @@
+# Model parameters
+model :
+  input_dims : 3077 # Number of counties
+  h1_dims : 2500
+  h2_dims : 1500
+  z_dims : 750
+  jitter : 0.0001
+  beta : NULL # use Null when not needed
+# Training parameters
+training :
+  n_samples : 1000 
+  n_batches : 100
+  epochs : 20 
+  lr : 0.001
+

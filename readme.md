@@ -32,5 +32,5 @@
 ## Grid Points (at county level)
 ![County Grids](plots/county_grids.png)
 
-## Prior Predictive Distribution over Regions
+## GP Spatial Prior Vs VAE reconstructed GP Spatial Prior
 ![Prior Preds](plots/gp_vs_vae_recon_spf.png)
